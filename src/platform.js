@@ -46,7 +46,9 @@ export class FlameConnectPlatform {
       handler = new FlameConnectAccessory(this, accessory, fire);
       this.handlers.set(accessory.UUID, handler);
     } else {
-      handler.updateFire(fire);
+      // The account device list contains the authoritative user-facing name.
+      // Overview responses on some models return a hardware identifier instead.
+      handler.updateFire(fire, true);
     }
     return handler;
   }
