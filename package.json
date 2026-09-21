@@ -38,11 +38,11 @@
     "node": "^22.10.0 || ^24.0.0",
     "homebridge": "^1.8.0 || ^2.0.0"
   },
-  "devDependencies": {
-    "homebridge": "^2.4.0"
-  },
   "scripts": {
     "test": "node --test",
     "pack:local": "npm pack"
+  },
+  "devDependencies": {
+    "homebridge": "^2.4.0"
   }
 }
