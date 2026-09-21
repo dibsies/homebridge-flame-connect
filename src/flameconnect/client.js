@@ -45,7 +45,7 @@ export class FlameConnectClient {
     this.log = log;
   }
 
-  async request(method, route, body) {
+  async request(method, route, body, retried = false) {
     const token = await this.auth.getAccessToken();
     const response = await fetch(`${API_BASE}${route}`, {
       method,
@@ -58,9 +58,9 @@ export class FlameConnectClient {
     });
     const text = await response.text();
     if (!response.ok) {
-      if (response.status === 401) {
+      if (response.status === 401 && !retried) {
         await this.auth.getAccessToken(true);
-        return this.request(method, route, body);
+        return this.request(method, route, body, true);
       }
       throw new Error(`Flame Connect API ${method} ${route} failed (${response.status}): ${text}`);
     }
@@ -105,10 +105,13 @@ export class FlameConnectClient {
       ParameterId: parameterId,
       Value: value,
     }));
-    await this.request('POST', '/api/Fires/WriteWifiParameters', {
+    const result = await this.request('POST', '/api/Fires/WriteWifiParameters', {
       FireId: fireId,
       Parameters: parameters,
     });
+    if (result?.ResultCode !== undefined && Number(result.ResultCode) !== 0) {
+      throw new Error(`Flame Connect rejected the command (result code ${result.ResultCode}).`);
+    }
   }
 
   async setPower(fireId, state, on) {

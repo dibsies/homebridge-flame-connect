@@ -27,18 +27,24 @@ export function createPkce() {
 export function buildAuthorizationRequest() {
   const { verifier, challenge } = createPkce();
   const state = base64Url(randomBytes(24));
+  // Match MSAL's OIDC auth-code flow. Flame Connect's B2C custom policy
+  // expects the hashed nonce claim that MSAL adds automatically.
+  const nonce = base64Url(randomBytes(24));
+  const nonceHash = base64Url(createHash('sha256').update(nonce).digest());
   const url = new URL(AUTHORIZE_ENDPOINT);
   url.search = new URLSearchParams({
     client_id: CLIENT_ID,
+    client_info: '1',
     response_type: 'code',
     redirect_uri: REDIRECT_URI,
     response_mode: 'query',
     scope: AUTH_SCOPES.join(' '),
     state,
+    nonce: nonceHash,
     code_challenge: challenge,
     code_challenge_method: 'S256',
   }).toString();
-  return { url: url.toString(), state, verifier };
+  return { url: url.toString(), state, verifier, nonce };
 }
 
 export function parseAuthorizationRedirect(input, expectedState) {
@@ -87,6 +93,7 @@ async function tokenRequest(fields) {
 export async function exchangeAuthorizationCode(code, verifier) {
   return tokenRequest({
     client_id: CLIENT_ID,
+    client_info: '1',
     grant_type: 'authorization_code',
     code,
     redirect_uri: REDIRECT_URI,
