@@ -3,7 +3,12 @@ import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 
 import initializer from '../src/index.js';
-import { applyServiceName, controlEnabled, mergeFireMetadata } from '../src/accessory.js';
+import {
+  applyServiceName,
+  applyServiceNameIfGenerated,
+  controlEnabled,
+  mergeFireMetadata,
+} from '../src/accessory.js';
 import { PLATFORM_NAME, PLUGIN_NAME } from '../src/settings.js';
 
 test('package metadata satisfies Homebridge plugin discovery rules', async () => {
@@ -15,6 +20,8 @@ test('package metadata satisfies Homebridge plugin discovery rules', async () =>
   assert.equal(pkg.type, 'module');
   assert.equal(pkg.main, 'src/index.js');
   assert.equal(pkg.private, undefined);
+  assert.equal(pkg.version, '0.1.5');
+  assert.equal(pkg.author, '@dibsies');
 });
 
 test('default ESM initializer registers the dynamic platform', () => {
@@ -57,6 +64,38 @@ test('individual controls default to enabled and can be disabled', () => {
   assert.equal(controlEnabled({}, 'exposeHeater'), true);
   assert.equal(controlEnabled({ exposeHeater: true }, 'exposeHeater'), true);
   assert.equal(controlEnabled({ exposeHeater: false }, 'exposeHeater'), false);
+});
+
+test('generated service labels migrate while Apple Home custom labels are preserved', () => {
+  const C = { Name: 'Name', ConfiguredName: 'ConfiguredName' };
+  const makeService = (value) => {
+    const values = { Name: value, ConfiguredName: value };
+    const service = {
+      displayName: value,
+      getCharacteristic: (key) => ({ value: values[key] }),
+      addOptionalCharacteristic: () => {},
+      setCharacteristic: (key, next) => {
+        values[key] = next;
+        return service;
+      },
+    };
+    return service;
+  };
+
+  const generated = makeService('Living Room Fire Flames');
+  applyServiceNameIfGenerated(generated, C, 'Flames', ['Living Room Fire Flames']);
+  assert.equal(generated.displayName, 'Flames');
+
+  const custom = makeService('Cozy Fire');
+  applyServiceNameIfGenerated(custom, C, 'Flames', ['Living Room Fire Flames']);
+  assert.equal(custom.displayName, 'Cozy Fire');
+
+  const customConfigured = makeService('Living Room Fire Flames');
+  customConfigured.getCharacteristic = (key) => ({
+    value: key === C.ConfiguredName ? 'My Custom Flames' : 'Living Room Fire Flames',
+  });
+  applyServiceNameIfGenerated(customConfigured, C, 'Flames', ['Living Room Fire Flames']);
+  assert.equal(customConfigured.displayName, 'Living Room Fire Flames');
 });
 
 test('device overview cannot replace the authoritative friendly name with a hardware id', () => {
