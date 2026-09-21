@@ -37,6 +37,7 @@ test('heat and log packets round trip', () => {
     type: 'heat', heatStatus: OnOff.ON, heatMode: 2,
     setpointTemperature: 19.5, boostDuration: 30,
   });
+
   const log = decodeParameter(ParameterId.LOG_EFFECT, encodeLog({
     logEffect: OnOff.ON, color: { red: 9, blue: 8, green: 7, white: 6 }, pattern: 4,
   }));
