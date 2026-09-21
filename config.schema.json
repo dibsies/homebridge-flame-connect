@@ -40,6 +40,42 @@
         "default": 30,
         "description": "Minimum seconds between on-demand cloud reads for one fireplace."
       },
+      "exposePower": {
+        "title": "Expose Fireplace Power",
+        "type": "boolean",
+        "default": true,
+        "description": "Show the main fireplace power switch in HomeKit."
+      },
+      "exposeFlames": {
+        "title": "Expose Flames and Brightness",
+        "type": "boolean",
+        "default": true,
+        "description": "Show the flame-effect switch and brightness slider in HomeKit."
+      },
+      "exposeHeater": {
+        "title": "Expose Heater",
+        "type": "boolean",
+        "default": true,
+        "description": "Show the heater switch when the fireplace reports heating support."
+      },
+      "exposeMediaLight": {
+        "title": "Expose Media Light",
+        "type": "boolean",
+        "default": true,
+        "description": "Show the media-light switch in HomeKit."
+      },
+      "exposeOverheadLight": {
+        "title": "Expose Overhead Light",
+        "type": "boolean",
+        "default": true,
+        "description": "Show the overhead-light switch in HomeKit."
+      },
+      "exposeLogs": {
+        "title": "Expose Logs",
+        "type": "boolean",
+        "default": true,
+        "description": "Show the log or ember-effect switch when supported."
+      },
       "advancedControls": {
         "title": "Expose Advanced Switches",
         "type": "boolean",
@@ -53,6 +89,12 @@
     "refreshToken",
     "pollIntervalMinutes",
     "cacheSeconds",
+    "exposePower",
+    "exposeFlames",
+    "exposeHeater",
+    "exposeMediaLight",
+    "exposeOverheadLight",
+    "exposeLogs",
     "advancedControls",
     "tokenFile"
   ]

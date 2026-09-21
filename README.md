@@ -32,6 +32,19 @@ This means Siri commands can be named naturally, for example:
 
 The plugin does not need to save your Flame Connect email/password. It uses Flame Connect's Azure AD B2C public-client OAuth flow.
 
+### Recommended on macOS
+
+Download `Flame-Connect-Token-Helper-macOS.zip` from the matching GitHub release, unzip it, and open **Flame Connect Token Helper**. It will:
+
+1. Open the secure Flame Connect sign-in page in your default browser.
+2. Receive the registered `msal…://auth` callback locally on your Mac.
+3. Exchange the one-time authorization code directly with Flame Connect.
+4. Restore the previous URL handler and offer a **Copy Refresh Token** button.
+
+No credentials or tokens pass through an external proxy. Paste the copied value into Homebridge → Flame Connect → **Refresh Token**.
+
+### Terminal fallback
+
 After installing the package, run:
 
 ```bash
@@ -79,8 +92,8 @@ Until this prototype is published to npm, download the generated `.tgz` on the H
 
 ```bash
 cd /tmp
-wget https://github.com/dibsies/homebridge-flame-connect/releases/download/v0.1.1/homebridge-flame-connect-0.1.1.tgz
-/opt/homebridge/bin/npm install --prefix /var/lib/homebridge /tmp/homebridge-flame-connect-0.1.1.tgz
+wget https://github.com/dibsies/homebridge-flame-connect/releases/download/v0.1.4/homebridge-flame-connect-0.1.4.tgz
+/opt/homebridge/bin/npm install --prefix /var/lib/homebridge /tmp/homebridge-flame-connect-0.1.4.tgz
 ```
 
 Do not use `npm install -g` for this Homebridge image: that puts the plugin under `/opt/homebridge/lib/node_modules`, while the service and its locally installed plugins live under `/var/lib/homebridge/node_modules`. Restart Homebridge after installation.
