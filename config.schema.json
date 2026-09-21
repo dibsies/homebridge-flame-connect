@@ -59,13 +59,13 @@
         "description": "Show the heater switch when the fireplace reports heating support."
       },
       "exposeMediaLight": {
-        "title": "Expose Media Light",
+        "title": "Expose Media Bed",
         "type": "boolean",
         "default": true,
         "description": "Show the media-light switch in HomeKit."
       },
       "exposeOverheadLight": {
-        "title": "Expose Overhead Light",
+        "title": "Expose Media Accent",
         "type": "boolean",
         "default": true,
         "description": "Show the overhead-light switch in HomeKit."
@@ -75,6 +75,54 @@
         "type": "boolean",
         "default": true,
         "description": "Show the log or ember-effect switch when supported."
+      },
+      "powerName": {
+        "title": "Fireplace control name",
+        "type": "string",
+        "default": "Fireplace",
+        "description": "Applied when this setting changes and Homebridge restarts. Later Apple Home renames are preserved."
+      },
+      "flamesName": {
+        "title": "Flames control name",
+        "type": "string",
+        "default": "Flames",
+        "description": "Applied when this setting changes and Homebridge restarts. Later Apple Home renames are preserved."
+      },
+      "heaterName": {
+        "title": "Heater control name",
+        "type": "string",
+        "default": "Heater",
+        "description": "Applied when this setting changes and Homebridge restarts. Later Apple Home renames are preserved."
+      },
+      "mediaLightName": {
+        "title": "Media Bed control name",
+        "type": "string",
+        "default": "Media Bed",
+        "description": "Applied when this setting changes and Homebridge restarts. Later Apple Home renames are preserved."
+      },
+      "overheadName": {
+        "title": "Media Accent control name",
+        "type": "string",
+        "default": "Media Accent",
+        "description": "Applied when this setting changes and Homebridge restarts. Later Apple Home renames are preserved."
+      },
+      "logsName": {
+        "title": "Logs control name",
+        "type": "string",
+        "default": "Logs",
+        "description": "Applied when this setting changes and Homebridge restarts. Later Apple Home renames are preserved."
+      },
+      "pulsatingName": {
+        "title": "Pulsating Effect control name",
+        "type": "string",
+        "default": "Pulsating Effect",
+        "description": "Applied when this setting changes and Homebridge restarts. Later Apple Home renames are preserved."
+      },
+      "ambientName": {
+        "title": "Ambient Sensor control name",
+        "type": "string",
+        "default": "Ambient Sensor",
+        "description": "Applied when this setting changes and Homebridge restarts. Later Apple Home renames are preserved."
       },
       "advancedControls": {
         "title": "Expose Advanced Switches",
@@ -96,6 +144,14 @@
     "exposeOverheadLight",
     "exposeLogs",
     "advancedControls",
+    "powerName",
+    "flamesName",
+    "heaterName",
+    "mediaLightName",
+    "overheadName",
+    "logsName",
+    "pulsatingName",
+    "ambientName",
     "tokenFile"
   ]
 }

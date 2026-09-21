@@ -11,8 +11,8 @@ Each Flame Connect fireplace is exposed as one HomeKit accessory with separate s
 - Fireplace: main power / standby
 - Flames: flame effect on/off and High/Low brightness
 - Heater: heater on/off, when supported
-- Media Light: on/off
-- Overhead Light: on/off
+- Media Bed: on/off, color picker, and brightness
+- Media Accent: on/off, color picker, and brightness
 - Logs: log/ember effect on/off, when supported
 - Optional advanced switches: Pulsating Effect and Ambient Sensor
 
@@ -63,6 +63,16 @@ Treat the refresh token like a password.
 
 ## Homebridge configuration
 
+Media Bed and Media Accent use the native Apple Home color picker and dimmer. Dimming scales RGBW intensity; it is separate from the Flames High/Low control. Selecting a color or brightness uses the shared User Defined media theme, so it can replace a theme selected in the Flame Connect app. The other light's color and on/off values are preserved. Color and dimming have been user-confirmed on a live fireplace; compatibility with other models still requires testing.
+
+Existing explicit names in configuration remain in effect, including Media Light or Overhead. Clear those fields to use the new defaults. Custom names already assigned in Apple Home remain preserved.
+
+The package credits @dibsies. Homebridge UI's dashboard author label is sourced from its plugin catalog or npm maintainer data rather than the local package author field; a locally installed, unpublished package can therefore still show an empty author label.
+
+Each control has an editable name in plugin settings, including the optional advanced controls. Blank names use the defaults listed above. Names apply to all fireplaces on this platform. Save and restart Homebridge to apply a changed setting. Afterward, names changed in Apple Home are preserved across cloud refreshes and restarts; deliberately changing a plugin name setting applies that new name once.
+
+Commands for each fireplace run in order so simultaneous Home commands do not write over one another. Cloud result-code rejections are reported as errors. Successful cloud requests do not by themselves prove a physical lighting change; Logs still needs device validation.
+
 In Homebridge UI, add the Flame Connect platform and paste the refresh token into **Flame Connect Refresh Token**.
 
 Equivalent JSON:
@@ -92,8 +102,8 @@ Until this prototype is published to npm, download the generated `.tgz` on the H
 
 ```bash
 cd /tmp
-wget https://github.com/dibsies/homebridge-flame-connect/releases/download/v0.1.4/homebridge-flame-connect-0.1.4.tgz
-/opt/homebridge/bin/npm install --prefix /var/lib/homebridge /tmp/homebridge-flame-connect-0.1.4.tgz
+wget https://github.com/dibsies/homebridge-flame-connect/releases/download/v0.1.5/homebridge-flame-connect-0.1.5.tgz
+/opt/homebridge/bin/npm install --prefix /var/lib/homebridge /tmp/homebridge-flame-connect-0.1.5.tgz
 ```
 
 Do not use `npm install -g` for this Homebridge image: that puts the plugin under `/opt/homebridge/lib/node_modules`, while the service and its locally installed plugins live under `/var/lib/homebridge/node_modules`. Restart Homebridge after installation.
@@ -104,8 +114,9 @@ The package name starts with `homebridge-`, its keywords include `homebridge-plu
 
 ## Limitations
 
-- The code and binary protocol have unit tests, but this prototype has not been authenticated against your specific fireplace/account yet.
-- Flame color presets, RGBW color selection, flame speed, thermostat setpoint, timer, sound, and media themes are decoded by the underlying protocol or planned, but are not yet surfaced as HomeKit controls in this first build.
+- Main power/flame operation and Media Bed/Media Accent color and dimming have been user-confirmed on one fireplace. Logs and other models still need physical verification.
+- Media Bed, Media Accent, and Logs are implemented writes (Flame Effect parameter 322 and Log Effect parameter 370). Unsupported features or rejected commands may prevent a physical effect.
+- Flame color presets, flame speed, thermostat setpoint, timer, sound, and media-theme selection are not exposed as HomeKit controls.
 - Flame Connect is an unofficial, unversioned cloud API and Dimplex/Glen Dimplex can change it at any time.
 - Because the API is cloud-based, commands require Internet access and may be slower than local HomeKit accessories.
 
