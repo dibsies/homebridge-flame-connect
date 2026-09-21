@@ -1,0 +1,59 @@
+{
+  "pluginAlias": "FlameConnect",
+  "pluginType": "platform",
+  "singular": true,
+  "strictValidation": false,
+  "schema": {
+    "type": "object",
+    "required": ["name"],
+    "additionalProperties": false,
+    "properties": {
+      "name": {
+        "title": "Name",
+        "type": "string",
+        "default": "Flame Connect"
+      },
+      "refreshToken": {
+        "title": "Flame Connect Refresh Token",
+        "type": "string",
+        "description": "Run the included flameconnect-auth helper once, then paste the refresh token here. After first successful startup, the plugin stores rotated tokens in Homebridge storage.",
+        "format": "password"
+      },
+      "tokenFile": {
+        "title": "Token File (advanced)",
+        "type": "string",
+        "description": "Optional absolute path for the persistent token file. Normally leave blank."
+      },
+      "pollIntervalMinutes": {
+        "title": "Background Refresh Interval",
+        "type": "integer",
+        "minimum": 5,
+        "maximum": 1440,
+        "default": 1440,
+        "description": "How often to refresh fireplace state in the background. Default is 24 hours to stay conservative with the cloud API. HomeKit reads also refresh stale state on demand."
+      },
+      "cacheSeconds": {
+        "title": "HomeKit Read Cache",
+        "type": "integer",
+        "minimum": 5,
+        "maximum": 600,
+        "default": 30,
+        "description": "Minimum seconds between on-demand cloud reads for one fireplace."
+      },
+      "advancedControls": {
+        "title": "Expose Advanced Switches",
+        "type": "boolean",
+        "default": false,
+        "description": "Also expose Pulsating Effect and Ambient Sensor as switches."
+      }
+    }
+  },
+  "layout": [
+    "name",
+    "refreshToken",
+    "pollIntervalMinutes",
+    "cacheSeconds",
+    "advancedControls",
+    "tokenFile"
+  ]
+}
