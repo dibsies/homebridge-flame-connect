@@ -2,7 +2,7 @@
 
 ## 0.1.4
 
-- Fixed cached overview metadata replacing the user-facing fireplace name with a hardware identifier such as `0702222A0006`.
+- Fixed cached overview metadata replacing the user-facing fireplace name with a hardware identifier such as `0702222A0000`.
 - Reapply all HomeKit service names from the authoritative account device list during discovery.
 
 ## 0.1.3
