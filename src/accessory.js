@@ -5,6 +5,7 @@ export const CONTROL_NAMES = {
   power: ['powerName', 'Fireplace'], flames: ['flamesName', 'Flames'],
   heater: ['heaterName', 'Heater'], 'media-light': ['mediaLightName', 'Media Bed'],
   'overhead-light': ['overheadName', 'Media Accent'], 'log-effect': ['logsName', 'Logs'],
+  'flame-speed': ['flameSpeedName', 'Flame Speed'],
   pulsating: ['pulsatingName', 'Pulsating Effect'], ambient: ['ambientName', 'Ambient Sensor'],
 };
 
@@ -58,7 +59,8 @@ export class FlameConnectAccessory {
     this.refreshPromise = null;
     this.commandQueue = Promise.resolve();
     // Serialize the entire read/modify/write operation, not just the POST.
-    for (const method of ['setPower', 'setFlames', 'setFlameBrightness', 'setFlameFlag', 'setHeat', 'setLogs', 'setLightColor']) {
+    for (const method of ['setPower', 'setFlames', 'setFlameBrightness', 'setFlameSpeed', 'setFlameFlag',
+      'setHeat', 'setHeatTemperature', 'setLogs', 'setLightColor', 'setLogColor']) {
       const operation = this[method].bind(this);
       this[method] = (...args) => {
         const pending = this.commandQueue.then(() => operation(...args));
@@ -99,12 +101,54 @@ export class FlameConnectAccessory {
 
     if (controlEnabled(platform.config, 'exposeHeater')
       && (fire.withHeat || fire.features?.simpleHeat || fire.features?.advancedHeat)) {
-      this.heatService = this.getService(Service.Switch, 'Heater', 'heater');
-      this.heatService.getCharacteristic(Characteristic.On)
-        .onGet(() => this.getHeat())
-        .onSet((value) => this.setHeat(Boolean(value)));
+      // v0.1.5 used a Switch with this subtype. Remove it before adding the
+      // Thermostat service so Apple Home does not retain duplicate controls.
+      const legacyHeatService = accessory.getServiceById?.(Service.Switch, 'heater')
+        || accessory.services.find((service) => service.UUID === Service.Switch.UUID && service.subtype === 'heater');
+      const legacyHeatName = legacyHeatService?.getCharacteristic?.(Characteristic.ConfiguredName)?.value;
+      this.removeService(Service.Switch, 'heater');
+      this.heatService = this.getService(Service.Thermostat, 'Heater', 'heater');
+      if (legacyHeatName && ![
+        'Heater', `${fire.friendlyName} Heater`, `${fire.fireId} Heater`,
+      ].includes(legacyHeatName)) {
+        applyServiceName(this.heatService, Characteristic, legacyHeatName);
+      }
+      const off = Characteristic.TargetHeatingCoolingState.OFF ?? 0;
+      const heat = Characteristic.TargetHeatingCoolingState.HEAT ?? 1;
+      this.heatService.getCharacteristic(Characteristic.TargetHeatingCoolingState)
+        .setProps?.({ validValues: [off, heat] })
+        .onGet(() => this.getHeatTargetState())
+        .onSet((value) => this.setHeat(Number(value) === heat));
+      this.heatService.getCharacteristic(Characteristic.CurrentHeatingCoolingState)
+        .onGet(() => this.getHeatCurrentState());
+      this.heatService.getCharacteristic(Characteristic.TargetTemperature)
+        .setProps?.({ minStep: 0.5 })
+        .onGet(() => this.getHeatSetpoint())
+        .onSet((value) => this.setHeatTemperature(Number(value)));
+      // The Flame Connect API exposes only a setpoint, not measured room
+      // temperature. Mirror the setpoint to satisfy HomeKit's required field.
+      this.heatService.getCharacteristic(Characteristic.CurrentTemperature)
+        .onGet(() => this.getHeatSetpoint());
+      this.heatService.getCharacteristic(Characteristic.TemperatureDisplayUnits)
+        .onGet(() => Characteristic.TemperatureDisplayUnits.CELSIUS ?? 0);
     } else {
       this.removeService(Service.Switch, 'heater');
+      this.removeService(Service.Thermostat, 'heater');
+    }
+
+    if (controlEnabled(platform.config, 'exposeFlameSpeed')) {
+      this.speedService = this.getService(Service.Fanv2, 'Flame Speed', 'flame-speed');
+      this.speedService.getCharacteristic(Characteristic.Active)
+        .onGet(() => this.getFlameSpeedActive())
+        .onSet((value) => this.setFlames(Number(value) !== (Characteristic.Active.INACTIVE ?? 0)));
+      const speedCharacteristic = this.speedService.getCharacteristic(Characteristic.RotationSpeed);
+      speedCharacteristic.updateValue?.(20);
+      speedCharacteristic
+        .setProps?.({ minValue: 20, maxValue: 100, minStep: 20 })
+        .onGet(() => this.getFlameSpeedPercent())
+        .onSet((value) => this.setFlameSpeed(Number(value)));
+    } else {
+      this.removeService(Service.Fanv2, 'flame-speed');
     }
 
     if (controlEnabled(platform.config, 'exposeMediaLight')) {
@@ -130,6 +174,12 @@ export class FlameConnectAccessory {
       this.logService.getCharacteristic(Characteristic.On)
         .onGet(() => this.getLogs())
         .onSet((value) => this.setLogs(Boolean(value)));
+      for (const [characteristic, field] of [[Characteristic.Hue, 'hue'],
+        [Characteristic.Saturation, 'saturation'], [Characteristic.Brightness, 'brightness']]) {
+        this.logService.getCharacteristic(characteristic)
+          .onGet(async () => { await this.ensureFresh(); return rgbwToHsv(this.state.log?.color)[field]; })
+          .onSet((value) => this.setLogColor(field, Number(value)));
+      }
     } else {
       this.removeService(Service.Lightbulb, 'log-effect');
     }
@@ -240,9 +290,26 @@ export class FlameConnectAccessory {
       this.overheadService?.updateCharacteristic(C.On, this.state.flame.overheadLight === OnOff.ON);
       this.pulseService?.updateCharacteristic(C.On, this.state.flame.pulsatingEffect === OnOff.ON);
       this.ambientService?.updateCharacteristic(C.On, this.state.flame.ambientSensor === OnOff.ON);
+      this.speedService?.updateCharacteristic(C.Active, this.state.flame.flameEffect === OnOff.ON
+        ? (C.Active.ACTIVE ?? 1) : (C.Active.INACTIVE ?? 0));
+      this.speedService?.updateCharacteristic(C.RotationSpeed, this.state.flame.flameSpeed * 20);
     }
-    if (this.state.heat && this.heatService) this.heatService.updateCharacteristic(C.On, this.state.heat.heatStatus === OnOff.ON);
-    if (this.state.log && this.logService) this.logService.updateCharacteristic(C.On, this.state.log.logEffect === OnOff.ON);
+    if (this.state.heat && this.heatService) {
+      const heating = this.state.heat.heatStatus === OnOff.ON;
+      this.heatService.updateCharacteristic(C.TargetHeatingCoolingState,
+        heating ? (C.TargetHeatingCoolingState.HEAT ?? 1) : (C.TargetHeatingCoolingState.OFF ?? 0));
+      this.heatService.updateCharacteristic(C.CurrentHeatingCoolingState,
+        heating ? (C.CurrentHeatingCoolingState.HEAT ?? 1) : (C.CurrentHeatingCoolingState.OFF ?? 0));
+      this.heatService.updateCharacteristic(C.TargetTemperature, this.state.heat.setpointTemperature);
+      this.heatService.updateCharacteristic(C.CurrentTemperature, this.state.heat.setpointTemperature);
+    }
+    if (this.state.log && this.logService) {
+      this.logService.updateCharacteristic(C.On, this.state.log.logEffect === OnOff.ON);
+      const hsv = rgbwToHsv(this.state.log.color);
+      this.logService.updateCharacteristic(C.Hue, hsv.hue);
+      this.logService.updateCharacteristic(C.Saturation, hsv.saturation);
+      this.logService.updateCharacteristic(C.Brightness, hsv.brightness);
+    }
   }
 
   async getPower() {
@@ -288,6 +355,27 @@ export class FlameConnectAccessory {
     this.pushStateToHomeKit();
   }
 
+  async getFlameSpeedActive() {
+    await this.ensureFresh();
+    return this.state.flame?.flameEffect === OnOff.ON
+      ? (this.platform.Characteristic.Active.ACTIVE ?? 1)
+      : (this.platform.Characteristic.Active.INACTIVE ?? 0);
+  }
+
+  async getFlameSpeedPercent() {
+    await this.ensureFresh();
+    return Math.min(5, Math.max(1, Number(this.state.flame?.flameSpeed ?? 1))) * 20;
+  }
+
+  async setFlameSpeed(percent) {
+    if (!Number.isFinite(percent)) throw new Error('Invalid flame speed.');
+    await this.ensureFresh(true);
+    const speed = Math.min(5, Math.max(1, Math.round(percent / 20)));
+    this.state.flame = await this.platform.client.setFlameSpeed(this.fire.fireId, this.state.flame, speed);
+    this.lastRefresh = Date.now();
+    this.pushStateToHomeKit();
+  }
+
   async getFlameFlag(key) {
     await this.ensureFresh();
     return this.state.flame?.[key] === OnOff.ON;
@@ -325,9 +413,34 @@ export class FlameConnectAccessory {
     return this.state.heat?.heatStatus === OnOff.ON;
   }
 
+  async getHeatTargetState() {
+    return await this.getHeat()
+      ? (this.platform.Characteristic.TargetHeatingCoolingState.HEAT ?? 1)
+      : (this.platform.Characteristic.TargetHeatingCoolingState.OFF ?? 0);
+  }
+
+  async getHeatCurrentState() {
+    return await this.getHeat()
+      ? (this.platform.Characteristic.CurrentHeatingCoolingState.HEAT ?? 1)
+      : (this.platform.Characteristic.CurrentHeatingCoolingState.OFF ?? 0);
+  }
+
+  async getHeatSetpoint() {
+    await this.ensureFresh();
+    return Number(this.state.heat?.setpointTemperature ?? 22);
+  }
+
   async setHeat(on) {
     await this.ensureFresh(true);
     this.state.heat = await this.platform.client.setHeat(this.fire.fireId, this.state.heat, on);
+    this.lastRefresh = Date.now();
+    this.pushStateToHomeKit();
+  }
+
+  async setHeatTemperature(value) {
+    if (!Number.isFinite(value)) throw new Error('Invalid heater target temperature.');
+    await this.ensureFresh(true);
+    this.state.heat = await this.platform.client.setHeatTemperature(this.fire.fireId, this.state.heat, value);
     this.lastRefresh = Date.now();
     this.pushStateToHomeKit();
   }
@@ -340,6 +453,23 @@ export class FlameConnectAccessory {
   async setLogs(on) {
     await this.ensureFresh(true);
     this.state.log = await this.platform.client.setLog(this.fire.fireId, this.state.log, on);
+    this.lastRefresh = Date.now();
+    this.pushStateToHomeKit();
+  }
+
+  async setLogColor(field, value) {
+    if (!['hue', 'saturation', 'brightness'].includes(field) || !Number.isFinite(value)) {
+      throw new Error('Invalid log color setting.');
+    }
+    await this.ensureFresh();
+    const hsv = rgbwToHsv(this.state.log?.color);
+    const remembered = (this.accessory.context.lightColors ||= {});
+    if (hsv.saturation === 0 && remembered.logColor) hsv.hue = remembered.logColor.hue;
+    const next = { ...(hsv.brightness === 0 ? remembered.logColor || hsv : hsv), [field]: value };
+    this.state.log = await this.platform.client.setLogColor(
+      this.fire.fireId, this.state.log, hsvToRgbw(next),
+    );
+    remembered.logColor = next;
     this.lastRefresh = Date.now();
     this.pushStateToHomeKit();
   }

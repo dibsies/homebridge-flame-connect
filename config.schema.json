@@ -53,10 +53,16 @@
         "description": "Show the flame-effect switch and brightness slider in HomeKit."
       },
       "exposeHeater": {
-        "title": "Expose Heater",
+        "title": "Expose Heater Thermostat",
         "type": "boolean",
         "default": true,
-        "description": "Show the heater switch when the fireplace reports heating support."
+        "description": "Show the heater as an off/heat thermostat with target-temperature control when supported. Flame Connect does not report measured room temperature, so HomeKit's current value mirrors the target."
+      },
+      "exposeFlameSpeed": {
+        "title": "Expose Flame Speed",
+        "type": "boolean",
+        "default": true,
+        "description": "Show a five-step HomeKit speed slider. 20%, 40%, 60%, 80%, and 100% correspond to Flame Connect speeds 1 through 5."
       },
       "exposeMediaLight": {
         "title": "Expose Media Bed",
@@ -74,7 +80,7 @@
         "title": "Expose Logs",
         "type": "boolean",
         "default": true,
-        "description": "Show the log or ember-effect switch when supported."
+        "description": "Show the log or ember effect with on/off, color, and brightness controls when supported."
       },
       "powerName": {
         "title": "Fireplace control name",
@@ -92,6 +98,12 @@
         "title": "Heater control name",
         "type": "string",
         "default": "Heater",
+        "description": "Applied when this setting changes and Homebridge restarts. Later Apple Home renames are preserved."
+      },
+      "flameSpeedName": {
+        "title": "Flame Speed control name",
+        "type": "string",
+        "default": "Flame Speed",
         "description": "Applied when this setting changes and Homebridge restarts. Later Apple Home renames are preserved."
       },
       "mediaLightName": {
@@ -140,6 +152,7 @@
     "exposePower",
     "exposeFlames",
     "exposeHeater",
+    "exposeFlameSpeed",
     "exposeMediaLight",
     "exposeOverheadLight",
     "exposeLogs",
@@ -147,6 +160,7 @@
     "powerName",
     "flamesName",
     "heaterName",
+    "flameSpeedName",
     "mediaLightName",
     "overheadName",
     "logsName",

@@ -155,9 +155,31 @@ export class FlameConnectClient {
     return next;
   }
 
+  async setHeatTemperature(fireId, current, temperature) {
+    if (!current) throw new Error('This fireplace did not report Heat Settings parameter 323.');
+    if (!Number.isFinite(temperature)) throw new Error('Invalid heater target temperature.');
+    const next = { ...current, setpointTemperature: Math.round(temperature * 2) / 2 };
+    await this.writeParameters(fireId, [{ parameterId: ParameterId.HEAT_SETTINGS, value: encodeHeat(next) }]);
+    return next;
+  }
+
+  async setFlameSpeed(fireId, current, speed) {
+    if (!current) throw new Error('This fireplace did not report Flame Effect parameter 322.');
+    const next = { ...current, flameSpeed: Math.min(5, Math.max(1, Math.round(Number(speed)))) };
+    await this.writeParameters(fireId, [{ parameterId: ParameterId.FLAME_EFFECT, value: encodeFlame(next) }]);
+    return next;
+  }
+
   async setLog(fireId, current, on) {
     if (!current) throw new Error('This fireplace did not report Log Effect parameter 370.');
     const next = { ...current, logEffect: on ? OnOff.ON : OnOff.OFF };
+    await this.writeParameters(fireId, [{ parameterId: ParameterId.LOG_EFFECT, value: encodeLog(next) }]);
+    return next;
+  }
+
+  async setLogColor(fireId, current, color) {
+    if (!current) throw new Error('This fireplace did not report Log Effect parameter 370.');
+    const next = { ...current, color };
     await this.writeParameters(fireId, [{ parameterId: ParameterId.LOG_EFFECT, value: encodeLog(next) }]);
     return next;
   }

@@ -20,8 +20,11 @@ test('package metadata satisfies Homebridge plugin discovery rules', async () =>
   assert.equal(pkg.type, 'module');
   assert.equal(pkg.main, 'src/index.js');
   assert.equal(pkg.private, undefined);
-  assert.equal(pkg.version, '0.1.5');
-  assert.equal(pkg.author, '@dibsies');
+  assert.equal(pkg.version, '0.1.6');
+  assert.deepEqual(pkg.author, {
+    name: 'dibsies',
+    url: 'https://github.com/dibsies',
+  });
 });
 
 test('default ESM initializer registers the dynamic platform', () => {
@@ -99,9 +102,9 @@ test('generated service labels migrate while Apple Home custom labels are preser
 });
 
 test('device overview cannot replace the authoritative friendly name with a hardware id', () => {
-  const cached = { fireId: 'fire-1', friendlyName: '0702222A0006' };
+  const cached = { fireId: 'fire-1', friendlyName: 'HARDWARE-ID-EXAMPLE' };
   const accountDevice = { fireId: 'fire-1', friendlyName: 'Living Room Fire' };
-  const overview = { fireId: 'fire-1', friendlyName: '0702222A0006', withHeat: true };
+  const overview = { fireId: 'fire-1', friendlyName: 'HARDWARE-ID-EXAMPLE', withHeat: true };
 
   const authoritative = mergeFireMetadata(cached, accountDevice, true);
   const refreshed = mergeFireMetadata(authoritative, overview);
@@ -114,7 +117,7 @@ test('device overview cannot replace the authoritative friendly name with a hard
 test('config schema exposes individual control toggles', async () => {
   const schema = JSON.parse(await readFile(new URL('../config.schema.json', import.meta.url), 'utf8'));
   for (const key of [
-    'exposePower', 'exposeFlames', 'exposeHeater',
+    'exposePower', 'exposeFlames', 'exposeHeater', 'exposeFlameSpeed',
     'exposeMediaLight', 'exposeOverheadLight', 'exposeLogs',
   ]) {
     assert.equal(schema.schema.properties[key].type, 'boolean');

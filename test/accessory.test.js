@@ -5,15 +5,33 @@ import { FlameConnectClient } from '../src/flameconnect/client.js';
 import { decodeParameter } from '../src/flameconnect/protocol.js';
 
 function fixture(config = {}, accessory) {
-  const Characteristic = Object.fromEntries(['Name', 'ConfiguredName', 'On', 'Brightness', 'Hue', 'Saturation'].map(k => [k, k]));
-  const Service = { Switch: {UUID:'switch'}, Lightbulb:{UUID:'light'}, AccessoryInformation:{UUID:'info'} };
+  const characteristic = (name, values = {}) => ({ ...values, toString: () => name });
+  const Characteristic = {
+    Name: characteristic('Name'), ConfiguredName: characteristic('ConfiguredName'),
+    On: characteristic('On'), Brightness: characteristic('Brightness'),
+    Hue: characteristic('Hue'), Saturation: characteristic('Saturation'),
+    Active: characteristic('Active', { INACTIVE: 0, ACTIVE: 1 }),
+    RotationSpeed: characteristic('RotationSpeed'),
+    TargetHeatingCoolingState: characteristic('TargetHeatingCoolingState', { OFF: 0, HEAT: 1 }),
+    CurrentHeatingCoolingState: characteristic('CurrentHeatingCoolingState', { OFF: 0, HEAT: 1 }),
+    TargetTemperature: characteristic('TargetTemperature'),
+    CurrentTemperature: characteristic('CurrentTemperature'),
+    TemperatureDisplayUnits: characteristic('TemperatureDisplayUnits', { CELSIUS: 0, FAHRENHEIT: 1 }),
+  };
+  const Service = {
+    Switch: {UUID:'switch'}, Lightbulb:{UUID:'light'}, Thermostat:{UUID:'thermostat'},
+    Fanv2:{UUID:'fan'}, AccessoryInformation:{UUID:'info'},
+  };
   accessory ||= {
     context: {}, services: [], getService() {},
     addService(type, name, subtype) {
       const values = {};
       const service = {
         UUID: type.UUID, subtype, displayName:name,
-        getCharacteristic(k) { return values[k] ||= {value: '', onGet() {return this;}, onSet() {return this;}}; },
+        getCharacteristic(k) { return values[k] ||= {
+          value: '', props: {}, onGet(fn) {this.getter=fn; return this;},
+          onSet(fn) {this.setter=fn; return this;}, setProps(props) {this.props=props; return this;},
+        }; },
         setCharacteristic(k,v) {this.getCharacteristic(k).value=v; return this;},
         updateCharacteristic(k,v) {return this.setCharacteristic(k,v);},
         addOptionalCharacteristic() {},
@@ -23,7 +41,12 @@ function fixture(config = {}, accessory) {
     removeService(s) {this.services=this.services.filter(x=>x!==s);},
   };
   const client = new FlameConnectClient({}, {});
-  let remote = {flame:{mediaLight:0,overheadLight:0}, log:{logEffect:0}};
+  let remote = {
+    flame:{flameEffect:1, flameSpeed:1, brightness:0, mediaLight:0, overheadLight:0,
+      mediaColor:{red:0,green:0,blue:0,white:0}, overheadColor:{red:0,green:0,blue:0,white:0}},
+    heat:{heatStatus:0,heatMode:0,setpointTemperature:22,boostDuration:1},
+    log:{logEffect:0,color:{red:0,green:0,blue:0,white:0},pattern:0},
+  };
   client.getFireOverview = async () => ({parameters:structuredClone(remote)});
   client.writeParameters = async (_id, entries) => {
     await Promise.resolve();
@@ -36,7 +59,8 @@ function fixture(config = {}, accessory) {
 
 test('configured names survive refresh and Home renames survive restart; config changes apply once', async () => {
   const f=fixture({flamesName:'Cozy Flames'});
-  assert.deepEqual(f.accessory.services.map(s=>s.displayName), ['Fireplace','Cozy Flames','Heater','Media Bed','Media Accent','Logs']);
+  assert.deepEqual(f.accessory.services.map(s=>s.displayName),
+    ['Fireplace','Cozy Flames','Heater','Flame Speed','Media Bed','Media Accent','Logs']);
   f.handler.flameService.setCharacteristic('ConfiguredName','Evening Glow');
   await f.handler.refresh();
   f.handler.updateFire({friendlyName:'New account name'},true);
@@ -87,6 +111,36 @@ test('separate HomeKit hue, saturation, and dimmer writes retain the selected co
   await f.handler.setLightColor('overheadColor','brightness',100);
   assert.deepEqual(f.remote().flame.overheadColor,{red:0,green:0,blue:0,white:255});
   assert.equal(f.remote().flame.mediaColor.blue,255);
+});
+
+test('thermostat sets heat state and half-degree target temperature', async () => {
+  const f=fixture();
+  await f.handler.setHeat(true);
+  await f.handler.setHeatTemperature(23.26);
+  assert.equal(f.remote().heat.heatStatus,1);
+  assert.equal(f.remote().heat.setpointTemperature,23.5);
+  assert.equal(await f.handler.getHeatTargetState(),1);
+  assert.equal(await f.handler.getHeatSetpoint(),23.5);
+  assert.equal(f.handler.heatService.getCharacteristic(f.handler.platform.Characteristic.TargetTemperature).props.minStep,0.5);
+});
+
+test('logs support RGBW color and brightness without changing their on state', async () => {
+  const f=fixture();
+  await f.handler.setLogs(true);
+  await f.handler.setLogColor('hue',120);
+  await f.handler.setLogColor('saturation',100);
+  await f.handler.setLogColor('brightness',50);
+  assert.deepEqual(f.remote().log.color,{red:0,green:128,blue:0,white:0});
+  assert.equal(f.remote().log.logEffect,1);
+});
+
+test('flame speed maps native five-step values to a HomeKit percentage slider', async () => {
+  const f=fixture();
+  await f.handler.setFlameSpeed(61);
+  assert.equal(f.remote().flame.flameSpeed,3);
+  assert.equal(await f.handler.getFlameSpeedPercent(),60);
+  assert.deepEqual(f.handler.speedService.getCharacteristic(f.handler.platform.Characteristic.RotationSpeed).props,
+    {minValue:20,maxValue:100,minStep:20});
 });
 
 test('default migration preserves a Home custom name', () => {

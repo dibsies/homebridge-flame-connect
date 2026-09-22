@@ -2,9 +2,12 @@
   "name": "homebridge-flame-connect",
   "displayName": "Homebridge Flame Connect",
   "type": "module",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Unofficial Homebridge plugin for Dimplex/Faber/Real Flame fireplaces using the Flame Connect cloud API.",
-  "author": "@dibsies",
+  "author": {
+    "name": "dibsies",
+    "url": "https://github.com/dibsies"
+  },
   "license": "Apache-2.0",
   "homepage": "https://github.com/dibsies/homebridge-flame-connect#readme",
   "repository": {
@@ -15,6 +18,7 @@
     "url": "https://github.com/dibsies/homebridge-flame-connect/issues"
   },
   "keywords": [
+    "homebridge",
     "homebridge-plugin",
     "supports-hap",
     "dimplex",
@@ -40,7 +44,11 @@
   },
   "scripts": {
     "test": "node --test",
-    "pack:local": "npm pack"
+    "pack:local": "npm pack",
+    "prepublishOnly": "node --test"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "devDependencies": {
     "homebridge": "^2.4.0"

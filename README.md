@@ -10,10 +10,11 @@ Each Flame Connect fireplace is exposed as one HomeKit accessory with separate s
 
 - Fireplace: main power / standby
 - Flames: flame effect on/off and High/Low brightness
-- Heater: heater on/off, when supported
+- Heater: off/heat thermostat and target temperature, when supported
+- Flame Speed: five steps represented as 20–100% in HomeKit
 - Media Bed: on/off, color picker, and brightness
 - Media Accent: on/off, color picker, and brightness
-- Logs: log/ember effect on/off, when supported
+- Logs: log/ember effect on/off, RGBW color, and brightness, when supported
 - Optional advanced switches: Pulsating Effect and Ambient Sensor
 
 This means Siri commands can be named naturally, for example:
@@ -65,6 +66,12 @@ Treat the refresh token like a password.
 
 Media Bed and Media Accent use the native Apple Home color picker and dimmer. Dimming scales RGBW intensity; it is separate from the Flames High/Low control. Selecting a color or brightness uses the shared User Defined media theme, so it can replace a theme selected in the Flame Connect app. The other light's color and on/off values are preserved. Color and dimming have been user-confirmed on a live fireplace; compatibility with other models still requires testing.
 
+The Heater uses HomeKit's thermostat interface for off/heat and target-temperature control. Flame Connect stores the setpoint in Celsius and HomeKit handles display conversion. The cloud API does not provide measured room temperature, although HomeKit requires that field, so the displayed current temperature mirrors the target and must not be interpreted as a sensor reading.
+
+HomeKit has no generic 1–5 control. Flame Speed therefore uses a native speed slider: 20%, 40%, 60%, 80%, and 100% map to speeds 1, 2, 3, 4, and 5. Its active control mirrors the Flames on/off state.
+
+Supported Logs effects use the same native color picker and dimmer behavior as the other RGBW lights. Changing Logs color preserves its on/off state.
+
 Existing explicit names in configuration remain in effect, including Media Light or Overhead. Clear those fields to use the new defaults. Custom names already assigned in Apple Home remain preserved.
 
 The package credits @dibsies. Homebridge UI's dashboard author label is sourced from its plugin catalog or npm maintainer data rather than the local package author field; a locally installed, unpublished package can therefore still show an empty author label.
@@ -114,9 +121,9 @@ The package name starts with `homebridge-`, its keywords include `homebridge-plu
 
 ## Limitations
 
-- Main power/flame operation and Media Bed/Media Accent color and dimming have been user-confirmed on one fireplace. Logs and other models still need physical verification.
+- Main power/flame operation and Media Bed/Media Accent color and dimming have been user-confirmed on one fireplace. The thermostat, Flame Speed, full-color Logs control, and other models still need physical verification.
 - Media Bed, Media Accent, and Logs are implemented writes (Flame Effect parameter 322 and Log Effect parameter 370). Unsupported features or rejected commands may prevent a physical effect.
-- Flame color presets, flame speed, thermostat setpoint, timer, sound, and media-theme selection are not exposed as HomeKit controls.
+- Flame color presets, timer, sound, heater presets, and media-theme selection are not exposed as HomeKit controls.
 - Flame Connect is an unofficial, unversioned cloud API and Dimplex/Glen Dimplex can change it at any time.
 - Because the API is cloud-based, commands require Internet access and may be slower than local HomeKit accessories.
 

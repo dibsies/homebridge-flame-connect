@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.6
+
+- Replace the heater switch with a HomeKit thermostat supporting off/heat and half-degree target-temperature changes.
+- Add full RGBW color and brightness control for supported Logs effects.
+- Add an optional five-step Flame Speed control using a native HomeKit speed slider.
+- Preserve serialized read/modify/write commands across the new controls.
+- Document that Flame Connect does not report measured room temperature; HomeKit's required current-temperature value mirrors the target.
+
 ## 0.1.5
 
 - Refine default light names to Media Bed and Media Accent, matching the official app.
@@ -21,7 +29,7 @@
 
 ## 0.1.4
 
-- Fixed cached overview metadata replacing the user-facing fireplace name with a hardware identifier such as `0702222A0006`.
+- Fixed cached overview metadata replacing the user-facing fireplace name with a device hardware identifier.
 - Reapply all HomeKit service names from the authoritative account device list during discovery.
 
 ## 0.1.3
