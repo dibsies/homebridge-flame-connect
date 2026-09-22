@@ -9,6 +9,32 @@ import {
 } from './constants.js';
 import { decodeParameter, encodeFlame, encodeHeat, encodeLog, encodeMode } from './protocol.js';
 
+// A single API command must never block a fireplace's whole command queue
+// indefinitely: a hung cloud call fails fast and the caller sees a proper
+// HomeKit communication error instead of a spinning tile.
+const API_REQUEST_TIMEOUT_MS = 15_000;
+
+// True for failures talking to the Flame Connect cloud (network errors,
+// timeouts, HTTP error responses, rejected tokens) as opposed to local
+// validation errors. Used to translate cloud problems into HomeKit
+// communication errors instead of generic failures.
+export function isCloudError(error) {
+  if (!error || typeof error !== 'object') return false;
+  return (
+    error.code === 'FLAMECONNECT_CLOUD_ERROR'
+    || error.code === 'FLAMECONNECT_REAUTH_REQUIRED'
+    || error.name === 'AbortError'
+    || error instanceof TypeError
+  );
+}
+
+function markCloudError(error) {
+  if (error && typeof error === 'object' && !error.code) {
+    error.code = 'FLAMECONNECT_CLOUD_ERROR';
+  }
+  return error;
+}
+
 function parseFeatures(data = {}) {
   return {
     sound: Boolean(data.Sound),
@@ -49,22 +75,28 @@ export class FlameConnectClient {
 
   async request(method, route, body, retried = false) {
     const token = await this.auth.getAccessToken();
-    const response = await fetch(`${API_BASE}${route}`, {
-      method,
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-        ...DEFAULT_HEADERS,
-      },
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
+    let response;
+    try {
+      response = await fetch(`${API_BASE}${route}`, {
+        method,
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+          ...DEFAULT_HEADERS,
+        },
+        body: body === undefined ? undefined : JSON.stringify(body),
+        signal: AbortSignal.timeout(API_REQUEST_TIMEOUT_MS),
+      });
+    } catch (error) {
+      throw markCloudError(error);
+    }
     const text = await response.text();
     if (!response.ok) {
       if (response.status === 401 && !retried) {
         await this.auth.getAccessToken(true);
         return this.request(method, route, body, true);
       }
-      throw new Error(`Flame Connect API ${method} ${route} failed (${response.status}): ${text}`);
+      throw markCloudError(new Error(`Flame Connect API ${method} ${route} failed (${response.status}): ${text}`));
     }
     if (!text) return null;
     return JSON.parse(text);

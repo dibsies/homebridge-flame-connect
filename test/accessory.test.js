@@ -187,3 +187,57 @@ test('default migration preserves a Home custom name', () => {
   const migrated=fixture({},f.accessory);
   assert.equal(migrated.handler.mediaService.getCharacteristic('ConfiguredName').value,'My Embers');
 });
+
+function withMockHap(handler) {
+  class HapStatusError extends Error {
+    constructor(status) {
+      super(`HAP ${status}`);
+      this.hapStatus = status;
+    }
+  }
+  handler.platform.api.hap = {
+    HapStatusError,
+    HAPStatus: { SERVICE_COMMUNICATION_FAILURE: -70402 },
+  };
+  return HapStatusError;
+}
+
+test('cloud failures surface as HomeKit communication errors on refresh', async () => {
+  const f = fixture();
+  const HapStatusError = withMockHap(f.handler);
+  const cloudError = new Error('fetch failed');
+  cloudError.name = 'AbortError';
+  f.client.getFireOverview = async () => { throw cloudError; };
+  await assert.rejects(
+    f.handler.refresh(),
+    (error) => error instanceof HapStatusError && error.hapStatus === -70402,
+  );
+});
+
+test('setter cloud failures surface as HomeKit communication errors', async () => {
+  const f = fixture();
+  const HapStatusError = withMockHap(f.handler);
+  const cloudError = Object.assign(new Error('Flame Connect API POST failed (500)'), {
+    code: 'FLAMECONNECT_CLOUD_ERROR',
+  });
+  f.client.writeParameters = async () => { throw cloudError; };
+  await assert.rejects(
+    f.handler.setFlames(true),
+    (error) => error instanceof HapStatusError && error.hapStatus === -70402,
+  );
+});
+
+test('local validation errors are not converted to HomeKit errors', async () => {
+  const f = fixture();
+  withMockHap(f.handler);
+  const validation = new Error('Invalid heater target temperature.');
+  f.client.getFireOverview = async () => { throw validation; };
+  await assert.rejects(f.handler.refresh(), (error) => error === validation);
+});
+
+test('missing HAP plumbing passes errors through unchanged', async () => {
+  const f = fixture();
+  const cloudError = Object.assign(new Error('boom'), { code: 'FLAMECONNECT_CLOUD_ERROR' });
+  f.client.getFireOverview = async () => { throw cloudError; };
+  await assert.rejects(f.handler.refresh(), (error) => error === cloudError);
+});

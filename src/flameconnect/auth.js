@@ -84,6 +84,11 @@ export function parseAuthorizationRedirect(input, expectedState) {
 
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
+// Authentication calls get a slightly longer budget than API commands: the
+// token endpoint occasionally pauses before responding, and a slow sign-in
+// must not wedge the whole plugin.
+const AUTH_REQUEST_TIMEOUT_MS = 20_000;
+
 async function tokenRequest(fields) {
   let response;
   let lastError;
@@ -93,6 +98,7 @@ async function tokenRequest(fields) {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: new URLSearchParams(fields),
+        signal: AbortSignal.timeout(AUTH_REQUEST_TIMEOUT_MS),
       });
       if (![429, 500, 502, 503, 504].includes(response.status)) break;
       lastError = new Error(`OAuth HTTP ${response.status}`);
@@ -145,6 +151,10 @@ export class FlameConnectAuth {
     this.tokenFile = tokenFile;
     this.log = log;
     this.loaded = false;
+    // Shared in-flight refresh. Azure rotates refresh tokens on use, so two
+    // concurrent refreshes can race and invalidate each other; every caller
+    // while a refresh is running joins the same promise instead.
+    this.refreshPromise = null;
     this.state = {
       accessToken: '',
       refreshToken: '',
@@ -197,6 +207,15 @@ export class FlameConnectAuth {
         'No Flame Connect refresh token is configured. Run flameconnect-auth and paste its refresh token into the Homebridge plugin settings.',
       );
     }
+    if (!this.refreshPromise) {
+      this.refreshPromise = this.performRefresh().finally(() => {
+        this.refreshPromise = null;
+      });
+    }
+    return this.refreshPromise;
+  }
+
+  async performRefresh() {
     let data;
     try {
       data = await exchangeRefreshToken(this.state.refreshToken);

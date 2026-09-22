@@ -14,6 +14,11 @@ export class FlameConnectPlatform {
     this.accessories = new Map();
     this.handlers = new Map();
     this.pollTimer = null;
+    // Startup discovery retry state. A failed first getFires() must not leave
+    // the plugin permanently dead: there may be no handlers for the poll loop
+    // to refresh, so discovery itself retries on a bounded backoff schedule.
+    this.discoveryTimer = null;
+    this.discoveryAttempts = 0;
 
     const storagePath = api.user.storagePath();
     const tokenFile = this.config.tokenFile || path.join(storagePath, 'flame-connect-tokens.json');
@@ -29,6 +34,7 @@ export class FlameConnectPlatform {
     });
     api.on('shutdown', () => {
       if (this.pollTimer) clearInterval(this.pollTimer);
+      this.clearDiscoveryRetry();
     });
   }
 
@@ -99,6 +105,8 @@ export class FlameConnectPlatform {
       if (!fires.length) {
         this.log.warn('Flame Connect account returned no fireplaces.');
       }
+      this.discoveryAttempts = 0;
+      this.clearDiscoveryRetry();
       this.startPolling();
     } catch (error) {
       this.log.error(`Flame Connect startup failed: ${error.message}`);
@@ -108,7 +116,36 @@ export class FlameConnectPlatform {
       if (!this.config.refreshToken) {
         this.log.error('Run flameconnect-auth once, then add the returned refresh token to this plugin configuration.');
       }
+      this.scheduleDiscoveryRetry(error);
     }
+  }
+
+  // Bounded exponential backoff for discovery retries: 10s, 20s, 40s, ...
+  // capped at 5 minutes. Kept as a method so tests can assert the bound.
+  discoveryRetryDelay(attempt) {
+    return Math.min(10_000 * 2 ** attempt, 300_000);
+  }
+
+  clearDiscoveryRetry() {
+    if (this.discoveryTimer) {
+      clearTimeout(this.discoveryTimer);
+      this.discoveryTimer = null;
+    }
+  }
+
+  scheduleDiscoveryRetry(error) {
+    const attempt = this.discoveryAttempts;
+    this.discoveryAttempts += 1;
+    const delayMs = this.discoveryRetryDelay(attempt);
+    this.log.error(
+      `Flame Connect discovery failed (attempt ${attempt + 1}); retrying in ${Math.round(delayMs / 1000)}s: ${error.message}`,
+    );
+    this.clearDiscoveryRetry();
+    this.discoveryTimer = setTimeout(() => {
+      this.discoveryTimer = null;
+      void this.discoverDevices();
+    }, delayMs);
+    this.discoveryTimer.unref?.();
   }
 
   startPolling() {
