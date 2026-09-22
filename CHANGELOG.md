@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.9
+
+- Replace ad-hoc cloud error flags with a consistent typed Flame Connect cloud error that safely wraps native Node errors.
+- Recognize Node's native `TimeoutError` and return HomeKit's operation-timed-out status instead of producing an unhandled characteristic warning.
+- Convert nonzero overview result codes and malformed status responses into HomeKit communication failures.
+- Retry a transient fireplace overview result once; writes remain non-retried to avoid duplicating a command whose outcome is uncertain.
+- Add a short post-failure cooldown that drains an already queued rapid-control burst without hammering an unavailable cloud service.
+- Add privacy-safe queue diagnostics and remove complete device identifiers from routine cloud error messages.
+- Add regression coverage for the reported timeout → result-code-1 sequence, safe recovery, queue cooldown, and identifier redaction; 58 tests pass.
+
 ## 0.1.8
 
 - Deduplicate concurrent token-file loading and OAuth refreshes, preventing rotated refresh-token races and intermittent startup authentication failures.

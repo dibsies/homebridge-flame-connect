@@ -2,20 +2,21 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { FlameConnectClient, isCloudError } from '../src/flameconnect/client.js';
+import { FlameConnectCloudError, asCloudError } from '../src/flameconnect/errors.js';
 
 test('isCloudError distinguishes cloud failures from local validation', () => {
   assert.equal(isCloudError(Object.assign(new Error('x'), { code: 'FLAMECONNECT_CLOUD_ERROR' })), true);
   assert.equal(isCloudError(Object.assign(new Error('x'), { code: 'FLAMECONNECT_REAUTH_REQUIRED' })), true);
-  const abort = new Error('aborted');
-  abort.name = 'AbortError';
-  assert.equal(isCloudError(abort), true);
-  // fetch() reports network failures as a TypeError carrying the system
-  // error as its cause; a bare TypeError is a programming defect, not a
-  // cloud failure, and must not be masked as one.
+  const timeout = new DOMException('The operation was aborted due to timeout', 'TimeoutError');
+  const wrappedTimeout = asCloudError(timeout);
+  assert.equal(isCloudError(wrappedTimeout), true);
+  assert.equal(wrappedTimeout.kind, 'timeout');
+  assert.equal(wrappedTimeout.cause, timeout);
   const networkFailure = new TypeError('fetch failed', {
     cause: Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }),
   });
-  assert.equal(isCloudError(networkFailure), true);
+  assert.equal(isCloudError(asCloudError(networkFailure)), true);
+  assert.equal(isCloudError(networkFailure), false);
   assert.equal(isCloudError(new TypeError('fetch failed')), false);
   assert.equal(isCloudError(new TypeError('Cannot read properties of undefined')), false);
   assert.equal(isCloudError(new Error('Invalid heater target temperature.')), false);
@@ -48,11 +49,7 @@ test('an aborted API request terminates and is classified as a cloud error', asy
   AbortSignal.timeout = () => controller.signal;
   // A hanging cloud call: only settles when the abort signal fires, at which
   // point fetch rejects the way the real one does on timeout.
-  const abortError = () => {
-    const error = new Error('The operation was aborted.');
-    error.name = 'AbortError';
-    return error;
-  };
+  const abortError = () => new DOMException('The operation was aborted due to timeout', 'TimeoutError');
   globalThis.fetch = (url, options) => new Promise((resolve, reject) => {
     if (options.signal.aborted) {
       reject(abortError());
@@ -68,8 +65,10 @@ test('an aborted API request terminates and is classified as a cloud error', asy
     await assert.rejects(
       pending,
       (error) => {
-        assert.equal(error.name, 'AbortError');
+        assert.equal(error.name, 'FlameConnectCloudError');
         assert.equal(error.code, 'FLAMECONNECT_CLOUD_ERROR');
+        assert.equal(error.kind, 'timeout');
+        assert.equal(error.cause?.name, 'TimeoutError');
         assert.equal(isCloudError(error), true);
         return true;
       },
@@ -126,6 +125,51 @@ test('HTTP error responses are marked as cloud errors', async () => {
       client.getFires(),
       (error) => error.code === 'FLAMECONNECT_CLOUD_ERROR',
     );
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('overview result code 1 retries once, hides the device id, and becomes a cloud error', async () => {
+  const original = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return {
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ ResultCode: 1 }),
+    };
+  };
+  try {
+    const client = new FlameConnectClient({ getAccessToken: async () => 'token' }, null);
+    await assert.rejects(
+      client.getFireOverview('PRIVATE-DEVICE-ID'),
+      (error) => error instanceof FlameConnectCloudError
+        && error.resultCode === 1
+        && !error.message.includes('PRIVATE-DEVICE-ID'),
+    );
+    assert.equal(calls, 2);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('overview transient result code recovers on its single safe read retry', async () => {
+  const original = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    const data = calls === 1
+      ? { ResultCode: 1 }
+      : { ResultCode: 0, WifiFireOverview: { FireId: 'id', FriendlyName: 'Fire', Parameters: [] } };
+    return { ok: true, status: 200, text: async () => JSON.stringify(data) };
+  };
+  try {
+    const client = new FlameConnectClient({ getAccessToken: async () => 'token' }, null);
+    const overview = await client.getFireOverview('id');
+    assert.equal(overview.fire.friendlyName, 'Fire');
+    assert.equal(calls, 2);
   } finally {
     globalThis.fetch = original;
   }

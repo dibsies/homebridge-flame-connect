@@ -1,5 +1,6 @@
-import { Brightness, FireMode, HeatMode, OnOff, isCloudError } from './flameconnect/client.js';
+import { Brightness, FireMode, HeatMode, OnOff } from './flameconnect/client.js';
 import { hsvToRgbw, rgbwToHsv } from './flameconnect/color.js';
+import { isCloudError } from './flameconnect/errors.js';
 
 export const CONTROL_NAMES = {
   power: ['powerName', 'Fireplace'], flames: ['flamesName', 'Flames'],
@@ -60,15 +61,43 @@ export class FlameConnectAccessory {
     this.lastRefresh = 0;
     this.refreshPromise = null;
     this.commandQueue = Promise.resolve();
+    this.queueDepth = 0;
+    this.cloudFailureUntil = 0;
+    this.lastCloudError = null;
     // Serialize the entire read/modify/write operation, not just the POST.
     for (const method of ['setPower', 'setFlames', 'setFlameBrightness', 'setFlameSpeed', 'setFlameFlag',
       'setHeat', 'setHeatTemperature', 'setEcoMode', 'setFanOnly', 'setTurboBoost',
       'setLogs', 'setLightColor', 'setLogColor']) {
       const operation = this[method].bind(this);
       this[method] = (...args) => {
+        const queuedAt = Date.now();
+        this.queueDepth += 1;
+        if (this.queueDepth > 1) {
+          this.platform.log?.debug?.(`Flame Connect command queued (${this.queueDepth} pending).`);
+        }
         const pending = this.commandQueue
-          .then(() => operation(...args))
-          .catch((error) => { throw this.toHapError(error); });
+          .then(() => {
+            const waitedMs = Date.now() - queuedAt;
+            if (waitedMs > 250) {
+              this.platform.log?.debug?.(`Flame Connect command waited ${waitedMs}ms in the queue.`);
+            }
+            if (Date.now() < this.cloudFailureUntil && this.lastCloudError) {
+              throw this.lastCloudError;
+            }
+            return operation(...args);
+          })
+          .catch((error) => {
+            if (isCloudError(error)) {
+              // A brief cooldown prevents an already queued HomeKit gesture
+              // burst from hammering a cloud service that just timed out.
+              this.cloudFailureUntil = Date.now() + 2_000;
+              this.lastCloudError = error;
+            }
+            throw this.toHapError(error);
+          })
+          .finally(() => {
+            this.queueDepth = Math.max(0, this.queueDepth - 1);
+          });
         this.commandQueue = pending.catch(() => {});
         return pending;
       };
@@ -312,7 +341,12 @@ export class FlameConnectAccessory {
     if (!hap?.HapStatusError || !hap?.HAPStatus) return error;
     if (error instanceof hap.HapStatusError) return error;
     if (isCloudError(error)) {
-      return new hap.HapStatusError(hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
+      this.cloudFailureUntil = Date.now() + 2_000;
+      this.lastCloudError = error;
+      const status = error.kind === 'timeout'
+        ? (hap.HAPStatus.OPERATION_TIMED_OUT ?? hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE)
+        : hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE;
+      return new hap.HapStatusError(status);
     }
     return error;
   }

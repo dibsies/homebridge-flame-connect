@@ -9,6 +9,7 @@ import {
   REDIRECT_URI,
   TOKEN_ENDPOINT,
 } from './constants.js';
+import { FlameConnectCloudError, asCloudError } from './errors.js';
 
 function base64Url(buffer) {
   return buffer
@@ -111,9 +112,10 @@ async function tokenRequest(fields) {
     // The token endpoint was unreachable on every attempt: a transient
     // network failure, so mark it for HomeKit communication-error mapping
     // rather than leaving a generic error.
-    const error = new Error(`Could not reach Flame Connect authentication: ${lastError?.message || 'network error'}`);
-    error.code = 'FLAMECONNECT_CLOUD_ERROR';
-    throw error;
+    throw asCloudError(
+      lastError,
+      `Could not reach Flame Connect authentication: ${lastError?.message || 'network error'}`,
+    );
   }
   const text = await response.text();
   let data;
@@ -122,21 +124,21 @@ async function tokenRequest(fields) {
   } catch {
     // The endpoint answered but not with JSON: a cloud-side problem, so
     // classify it deliberately rather than leaving a generic SyntaxError.
-    const error = new Error(`Flame Connect token endpoint returned HTTP ${response.status}: ${text}`);
-    error.code = 'FLAMECONNECT_CLOUD_ERROR';
-    throw error;
+    throw new FlameConnectCloudError(
+      `Flame Connect token endpoint returned an invalid response (HTTP ${response.status}).`,
+    );
   }
   if (!response.ok || data.error) {
     if (data.error === 'invalid_grant' || data.error === 'interaction_required') {
       throw new FlameConnectReauthenticationRequiredError();
     }
-    const error = new Error(data.error_description || data.error || `OAuth HTTP ${response.status}`);
+    const message = data.error_description || data.error || `OAuth HTTP ${response.status}`;
     // 429/5xx after retries is a transient cloud problem; other OAuth errors
     // (e.g. invalid_client) are configuration problems and stay unmarked.
     if ([429, 500, 502, 503, 504].includes(response.status)) {
-      error.code = 'FLAMECONNECT_CLOUD_ERROR';
+      throw new FlameConnectCloudError(message);
     }
-    throw error;
+    throw new Error(message);
   }
   return data;
 }

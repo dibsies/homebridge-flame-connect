@@ -7,6 +7,7 @@ import {
   OnOff,
   ParameterId,
 } from './constants.js';
+import { FlameConnectCloudError, asCloudError, isCloudError } from './errors.js';
 import { decodeParameter, encodeFlame, encodeHeat, encodeLog, encodeMode } from './protocol.js';
 
 // A single API command must never block a fireplace's whole command queue
@@ -14,39 +15,10 @@ import { decodeParameter, encodeFlame, encodeHeat, encodeLog, encodeMode } from 
 // HomeKit communication error instead of a spinning tile.
 const API_REQUEST_TIMEOUT_MS = 15_000;
 
-// True for failures talking to the Flame Connect cloud (network errors,
-// timeouts, HTTP error responses, rejected tokens) as opposed to local
-// validation errors. Used to translate cloud problems into HomeKit
-// communication errors instead of generic failures.
-// fetch() signals network failures with a TypeError, but a bare
-// `instanceof TypeError` would also swallow programming defects. Only treat it
-// as a cloud error when it carries a system cause code (ECONNREFUSED,
-// ETIMEDOUT, UND_ERR_CONNECT_TIMEOUT, ...), which is how the network stack
-// reports the underlying failure.
-function isFetchNetworkError(error) {
-  return (
-    error instanceof TypeError
-    && typeof error.cause?.code === 'string'
-    && error.cause.code.length > 0
-  );
-}
+export { isCloudError } from './errors.js';
 
-export function isCloudError(error) {
-  if (!error || typeof error !== 'object') return false;
-  return (
-    error.code === 'FLAMECONNECT_CLOUD_ERROR'
-    || error.code === 'FLAMECONNECT_REAUTH_REQUIRED'
-    || error.name === 'AbortError'
-    || isFetchNetworkError(error)
-  );
-}
-
-function markCloudError(error) {
-  if (error && typeof error === 'object' && !error.code) {
-    error.code = 'FLAMECONNECT_CLOUD_ERROR';
-  }
-  return error;
-}
+const OVERVIEW_RETRY_DELAY_MS = 500;
+const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
 function parseFeatures(data = {}) {
   return {
@@ -95,7 +67,7 @@ export class FlameConnectClient {
     try {
       token = await this.auth.getAccessToken();
     } catch (error) {
-      throw markCloudError(error);
+      throw asCloudError(error);
     }
     let response;
     try {
@@ -110,27 +82,27 @@ export class FlameConnectClient {
         signal: AbortSignal.timeout(API_REQUEST_TIMEOUT_MS),
       });
     } catch (error) {
-      throw markCloudError(error);
+      throw asCloudError(error);
     }
     let text;
     try {
       text = await response.text();
     } catch (error) {
-      throw markCloudError(error);
+      throw asCloudError(error);
     }
     if (!response.ok) {
       if (response.status === 401 && !retried) {
         await this.auth.getAccessToken(true);
         return this.request(method, route, body, true);
       }
-      throw markCloudError(new Error(`Flame Connect API ${method} ${route} failed (${response.status}): ${text}`));
+      throw new FlameConnectCloudError(`Flame Connect API ${method} ${route} failed (HTTP ${response.status}).`);
     }
     if (!text) return null;
     try {
       return JSON.parse(text);
     } catch {
-      throw markCloudError(
-        new Error(`Flame Connect API ${method} ${route} returned a response that was not valid JSON.`),
+      throw new FlameConnectCloudError(
+        `Flame Connect API ${method} ${route} returned an invalid response.`,
       );
     }
   }
@@ -140,18 +112,25 @@ export class FlameConnectClient {
     return Array.isArray(data) ? data.map((entry) => parseFire(entry)) : [];
   }
 
-  async getFireOverview(fireId) {
+  async getFireOverview(fireId, retried = false) {
     const data = await this.request(
       'GET',
       `/api/Fires/GetFireOverview?FireId=${encodeURIComponent(fireId)}`,
     );
     const resultCode = Number(data?.ResultCode ?? 0);
     if (resultCode !== 0) {
-      throw new Error(`Fireplace ${fireId} is unavailable (Flame Connect result code ${resultCode}).`);
+      if (!retried) {
+        await delay(OVERVIEW_RETRY_DELAY_MS);
+        return this.getFireOverview(fireId, true);
+      }
+      throw new FlameConnectCloudError(
+        `Flame Connect reported that the fireplace is temporarily unavailable (result code ${resultCode}).`,
+        { resultCode },
+      );
     }
     const wifi = data?.WifiFireOverview;
     if (!wifi) {
-      throw new Error(`Flame Connect did not return WifiFireOverview for ${fireId}.`);
+      throw new FlameConnectCloudError('Flame Connect did not return fireplace status data.');
     }
     const featureData = data?.FireDetails?.FireFeature || wifi.FireFeature || {};
     const fire = parseFire(wifi, parseFeatures(featureData));

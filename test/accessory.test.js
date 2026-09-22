@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+
+import { FlameConnectCloudError } from '../src/flameconnect/errors.js';
 import { FlameConnectAccessory } from '../src/accessory.js';
 import { FlameConnectClient } from '../src/flameconnect/client.js';
 import { decodeParameter } from '../src/flameconnect/protocol.js';
@@ -197,7 +199,7 @@ function withMockHap(handler) {
   }
   handler.platform.api.hap = {
     HapStatusError,
-    HAPStatus: { SERVICE_COMMUNICATION_FAILURE: -70402 },
+    HAPStatus: { SERVICE_COMMUNICATION_FAILURE: -70402, OPERATION_TIMED_OUT: -70408 },
   };
   return HapStatusError;
 }
@@ -205,21 +207,18 @@ function withMockHap(handler) {
 test('cloud failures surface as HomeKit communication errors on refresh', async () => {
   const f = fixture();
   const HapStatusError = withMockHap(f.handler);
-  const cloudError = new Error('fetch failed');
-  cloudError.name = 'AbortError';
+  const cloudError = new FlameConnectCloudError('timed out', { kind: 'timeout' });
   f.client.getFireOverview = async () => { throw cloudError; };
   await assert.rejects(
     f.handler.refresh(),
-    (error) => error instanceof HapStatusError && error.hapStatus === -70402,
+    (error) => error instanceof HapStatusError && error.hapStatus === -70408,
   );
 });
 
 test('setter cloud failures surface as HomeKit communication errors', async () => {
   const f = fixture();
   const HapStatusError = withMockHap(f.handler);
-  const cloudError = Object.assign(new Error('Flame Connect API POST failed (500)'), {
-    code: 'FLAMECONNECT_CLOUD_ERROR',
-  });
+  const cloudError = new FlameConnectCloudError('Flame Connect API POST failed (500)');
   f.client.writeParameters = async () => { throw cloudError; };
   await assert.rejects(
     f.handler.setFlames(true),
@@ -237,7 +236,25 @@ test('local validation errors are not converted to HomeKit errors', async () => 
 
 test('missing HAP plumbing passes errors through unchanged', async () => {
   const f = fixture();
-  const cloudError = Object.assign(new Error('boom'), { code: 'FLAMECONNECT_CLOUD_ERROR' });
+  const cloudError = new FlameConnectCloudError('boom');
   f.client.getFireOverview = async () => { throw cloudError; };
   await assert.rejects(f.handler.refresh(), (error) => error === cloudError);
+});
+
+test('a cloud failure briefly drains an already queued command burst without more requests', async () => {
+  const f = fixture();
+  withMockHap(f.handler);
+  let overviewCalls = 0;
+  f.client.getFireOverview = async () => {
+    overviewCalls += 1;
+    throw new FlameConnectCloudError('temporarily unavailable');
+  };
+  const results = await Promise.allSettled([
+    f.handler.setFlames(true),
+    f.handler.setLogs(true),
+    f.handler.setHeat(true),
+  ]);
+  assert.deepEqual(results.map((result) => result.status), ['rejected', 'rejected', 'rejected']);
+  assert.equal(overviewCalls, 1);
+  assert.equal(f.handler.queueDepth, 0);
 });
