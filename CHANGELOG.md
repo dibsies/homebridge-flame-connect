@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.1.8
+
+- Deduplicate concurrent token-file loading and OAuth refreshes, preventing rotated refresh-token races and intermittent startup authentication failures.
+- Add bounded 15-second API and 20-second authentication request timeouts so stalled cloud connections cannot block a fireplace command queue indefinitely.
+- Retry failed startup discovery with bounded exponential backoff while correctly stopping for missing or revoked authentication that requires user action.
+- Surface cloud, authentication, malformed-response, and timeout failures as HomeKit communication errors while preserving local validation errors.
+- Add repository hygiene and pnpm-based CI across Node.js 22 and 24.
+- Expand regression coverage to 55 tests, including concurrency, timeouts, discovery recovery, permanent authentication states, and HomeKit error mapping.
+- Validate the release candidate on a live fireplace across power, lighting, color, flame speed, thermostat, Eco, Fan Only, and Turbo Boost controls.
+
 ## 0.1.7
 
 - Add capability-gated Eco Mode, Fan Only, and timed Turbo Boost controls while leaving the thermostat behavior unchanged.

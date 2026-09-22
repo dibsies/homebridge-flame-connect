@@ -20,7 +20,7 @@ test('package metadata satisfies Homebridge plugin discovery rules', async () =>
   assert.equal(pkg.type, 'module');
   assert.equal(pkg.main, 'src/index.js');
   assert.equal(pkg.private, undefined);
-  assert.equal(pkg.version, '0.1.7');
+  assert.equal(pkg.version, '0.1.8');
   assert.deepEqual(pkg.author, {
     name: 'dibsies',
     url: 'https://github.com/dibsies',
