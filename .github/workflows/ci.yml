@@ -2,6 +2,7 @@ name: CI
 
 on:
   push:
+    branches: [main]
   pull_request:
 
 jobs:
@@ -12,10 +13,16 @@ jobs:
         node-version: [22, 24]
     steps:
       - uses: actions/checkout@v4
+      # The repository is pnpm-managed (pnpm-lock.yaml); installing with npm
+      # would generate a competing package-lock.json.
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
+          cache: pnpm
       # The UI-server test forks homebridge-ui/server.js, which needs the
       # published dependencies installed to start over Homebridge IPC.
-      - run: npm install --no-audit --no-fund
-      - run: npm test
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test

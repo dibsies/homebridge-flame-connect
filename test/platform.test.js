@@ -80,3 +80,36 @@ test('successful discovery clears retry state and starts polling', async () => {
     platform.pollTimer = null;
   }
 });
+
+test('revoked sign-in does not schedule discovery retries', async () => {
+  const { platform, messages } = mockPlatform({ refreshToken: 'rt' });
+  platform.client.getFires = async () => {
+    throw Object.assign(new Error('revoked'), { code: 'FLAMECONNECT_REAUTH_REQUIRED' });
+  };
+  try {
+    await platform.discoverDevices();
+    assert.equal(platform.discoveryAttempts, 0);
+    assert.equal(platform.discoveryTimer, null);
+    assert.equal(platform.pollTimer, null);
+    assert.ok(messages.some(([level, m]) => level === 'error' && /flameconnect-auth again/.test(m)));
+  } finally {
+    platform.clearDiscoveryRetry();
+  }
+});
+
+test('missing refresh token does not schedule discovery retries', async () => {
+  const { platform, messages } = mockPlatform({});
+  platform.client.getFires = async () => {
+    const error = new Error('No Flame Connect refresh token is configured.');
+    error.code = 'FLAMECONNECT_NO_TOKEN';
+    throw error;
+  };
+  try {
+    await platform.discoverDevices();
+    assert.equal(platform.discoveryAttempts, 0);
+    assert.equal(platform.discoveryTimer, null);
+    assert.ok(messages.some(([level, m]) => level === 'error' && /flameconnect-auth once/.test(m)));
+  } finally {
+    platform.clearDiscoveryRetry();
+  }
+});

@@ -110,11 +110,16 @@ export class FlameConnectPlatform {
       this.startPolling();
     } catch (error) {
       this.log.error(`Flame Connect startup failed: ${error.message}`);
+      // Permanent authentication states need the user, not another attempt:
+      // retrying them on the backoff schedule burns requests and spams the
+      // log every five minutes until someone restarts Homebridge.
       if (error?.code === 'FLAMECONNECT_REAUTH_REQUIRED') {
         this.log.error('The saved Flame Connect sign-in is no longer valid. Run flameconnect-auth again; your fireplace configuration is unaffected.');
+        return;
       }
-      if (!this.config.refreshToken) {
+      if (error?.code === 'FLAMECONNECT_NO_TOKEN') {
         this.log.error('Run flameconnect-auth once, then add the returned refresh token to this plugin configuration.');
+        return;
       }
       this.scheduleDiscoveryRetry(error);
     }
