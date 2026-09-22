@@ -147,10 +147,14 @@ export function encodeFlame(param) {
 }
 
 export function encodeHeat(param) {
-  const wireBoost = Math.max(0, Number(param.boostDuration ?? 1) - 1);
+  const duration = Math.min(20, Math.max(1, Number(param.boostDuration ?? 1)));
+  const wireBoost = duration - 1;
   const payload = Buffer.concat([
     Buffer.from([Number(param.heatStatus ?? 0), Number(param.heatMode ?? 0)]),
     encodeTemperature(param.setpointTemperature ?? 22),
+    // The Flame Connect write packet is exactly five payload bytes. Although
+    // some reads contain an additional high duration byte, the official app
+    // and upstream reference encoder write only the low byte here.
     Buffer.from([wireBoost & 0xff]),
   ]);
   return makePacket(ParameterId.HEAT_SETTINGS, payload).toString('base64');

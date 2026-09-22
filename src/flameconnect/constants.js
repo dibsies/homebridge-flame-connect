@@ -37,5 +37,6 @@ export const ParameterId = Object.freeze({
 });
 
 export const FireMode = Object.freeze({ STANDBY: 0, MANUAL: 1 });
+export const HeatMode = Object.freeze({ NORMAL: 0, BOOST: 1, ECO: 2, FAN_ONLY: 3, SCHEDULE: 4 });
 export const OnOff = Object.freeze({ OFF: 0, ON: 1 });
 export const Brightness = Object.freeze({ HIGH: 0, LOW: 1 });

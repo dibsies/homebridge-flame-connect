@@ -20,11 +20,13 @@ test('package metadata satisfies Homebridge plugin discovery rules', async () =>
   assert.equal(pkg.type, 'module');
   assert.equal(pkg.main, 'src/index.js');
   assert.equal(pkg.private, undefined);
-  assert.equal(pkg.version, '0.1.6');
+  assert.equal(pkg.version, '0.1.7');
   assert.deepEqual(pkg.author, {
     name: 'dibsies',
     url: 'https://github.com/dibsies',
   });
+  assert.equal(pkg.dependencies['@homebridge/plugin-ui-utils'], '^2.2.6');
+  assert.ok(pkg.files.includes('homebridge-ui'));
 });
 
 test('default ESM initializer registers the dynamic platform', () => {
@@ -39,6 +41,19 @@ test('config schema alias matches registered platform', async () => {
   const schema = JSON.parse(await readFile(new URL('../config.schema.json', import.meta.url), 'utf8'));
   assert.equal(schema.pluginAlias, PLATFORM_NAME);
   assert.equal(schema.pluginType, 'platform');
+  assert.equal(schema.customUi, true);
+});
+
+test('custom UI provides direct and browser-fallback sign-in paths', async () => {
+  const html = await readFile(new URL('../homebridge-ui/public/index.html', import.meta.url), 'utf8');
+  const server = await readFile(new URL('../homebridge-ui/server.js', import.meta.url), 'utf8');
+  assert.match(html, /Start sign-in/u);
+  assert.match(html, /Sign in and connect/u);
+  assert.match(html, /Complete sign-in/u);
+  assert.match(server, /parseAuthorizationRedirect/u);
+  assert.match(html, /type=["']password["']/u);
+  assert.match(html, /passwordInput\.value = ''/u);
+  assert.doesNotMatch(server, /console\.(?:log|debug).*token/iu);
 });
 
 test('service names include the modern HomeKit configured name', () => {
@@ -117,7 +132,8 @@ test('device overview cannot replace the authoritative friendly name with a hard
 test('config schema exposes individual control toggles', async () => {
   const schema = JSON.parse(await readFile(new URL('../config.schema.json', import.meta.url), 'utf8'));
   for (const key of [
-    'exposePower', 'exposeFlames', 'exposeHeater', 'exposeFlameSpeed',
+    'exposePower', 'exposeFlames', 'exposeHeater', 'exposeEcoMode', 'exposeFanOnly',
+    'exposeTurboBoost', 'exposeFlameSpeed',
     'exposeMediaLight', 'exposeOverheadLight', 'exposeLogs',
   ]) {
     assert.equal(schema.schema.properties[key].type, 'boolean');

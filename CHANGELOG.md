@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.7
+
+- Add capability-gated Eco Mode, Fan Only, and timed Turbo Boost controls while leaving the thermostat behavior unchanged.
+- Correct the Heat Settings write packet to the authoritative five-byte payload; the rejected test candidate briefly used an invalid extra byte.
+- Represent Fan Only as a native HomeKit fan service and link advanced heater controls to the thermostat.
+- Restore Normal/Eco state safely after temporary heater modes; exiting Fan Only never unexpectedly starts heat.
+- Label the Flame Speed slider using its configured HomeKit service name.
+- Add a guided Flame Connect sign-in card directly to Homebridge settings for macOS, Windows, and Linux, while retaining the browser-aware terminal helper and secure token-file workflow.
+- Make one-time email/password sign-in the recommended cross-platform path, forwarding credentials only to the known Flame Connect Microsoft B2C tenant and never persisting or logging them; retain browser sign-in as a fallback.
+- Retry transient OAuth failures, preserve rotated refresh tokens, identify revoked sign-ins clearly, and avoid logging secrets.
+- Add privacy-safe capability diagnostics and expanded protocol/control/authentication regression coverage.
+
 ## 0.1.6
 
 - Replace the heater switch with a HomeKit thermostat supporting off/heat and half-degree target-temperature changes.

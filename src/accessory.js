@@ -1,4 +1,4 @@
-import { Brightness, FireMode, OnOff } from './flameconnect/client.js';
+import { Brightness, FireMode, HeatMode, OnOff } from './flameconnect/client.js';
 import { hsvToRgbw, rgbwToHsv } from './flameconnect/color.js';
 
 export const CONTROL_NAMES = {
@@ -6,6 +6,8 @@ export const CONTROL_NAMES = {
   heater: ['heaterName', 'Heater'], 'media-light': ['mediaLightName', 'Media Bed'],
   'overhead-light': ['overheadName', 'Media Accent'], 'log-effect': ['logsName', 'Logs'],
   'flame-speed': ['flameSpeedName', 'Flame Speed'],
+  'eco-mode': ['ecoModeName', 'Eco Mode'], 'fan-only': ['fanOnlyName', 'Fan Only'],
+  'turbo-boost': ['turboBoostName', 'Turbo Boost'],
   pulsating: ['pulsatingName', 'Pulsating Effect'], ambient: ['ambientName', 'Ambient Sensor'],
 };
 
@@ -60,7 +62,8 @@ export class FlameConnectAccessory {
     this.commandQueue = Promise.resolve();
     // Serialize the entire read/modify/write operation, not just the POST.
     for (const method of ['setPower', 'setFlames', 'setFlameBrightness', 'setFlameSpeed', 'setFlameFlag',
-      'setHeat', 'setHeatTemperature', 'setLogs', 'setLightColor', 'setLogColor']) {
+      'setHeat', 'setHeatTemperature', 'setEcoMode', 'setFanOnly', 'setTurboBoost',
+      'setLogs', 'setLightColor', 'setLogColor']) {
       const operation = this[method].bind(this);
       this[method] = (...args) => {
         const pending = this.commandQueue.then(() => operation(...args));
@@ -136,15 +139,56 @@ export class FlameConnectAccessory {
       this.removeService(Service.Thermostat, 'heater');
     }
 
+    const hasAdvancedHeat = Boolean(this.heatService && fire.features?.advancedHeat);
+    if (hasAdvancedHeat && controlEnabled(platform.config, 'exposeEcoMode')) {
+      this.ecoService = this.getService(Service.Switch, 'Eco Mode', 'eco-mode');
+      this.ecoService.getCharacteristic(Characteristic.On)
+        .onGet(() => this.getHeatMode(HeatMode.ECO))
+        .onSet((value) => this.setEcoMode(Boolean(value)));
+    } else this.removeService(Service.Switch, 'eco-mode');
+
+    if (this.heatService && fire.features?.fanOnly && controlEnabled(platform.config, 'exposeFanOnly')) {
+      // Migrate the rejected v0.1.7 candidate's generic switch to a native fan
+      // service. Apple Home represents this more clearly as a fan power tile.
+      this.removeService(Service.Switch, 'fan-only');
+      this.fanOnlyService = this.getService(Service.Fanv2, 'Fan Only', 'fan-only');
+      this.fanOnlyService.getCharacteristic(Characteristic.Active)
+        .onGet(() => this.getHeatMode(HeatMode.FAN_ONLY))
+        .onSet((value) => this.setFanOnly(
+          Number(value) !== (Characteristic.Active.INACTIVE ?? 0),
+        ));
+    } else {
+      this.removeService(Service.Switch, 'fan-only');
+      this.removeService(Service.Fanv2, 'fan-only');
+    }
+
+    if (this.heatService && fire.features?.powerBoost && controlEnabled(platform.config, 'exposeTurboBoost')) {
+      this.boostService = this.getService(Service.Switch, 'Turbo Boost', 'turbo-boost');
+      this.boostService.getCharacteristic(Characteristic.On)
+        .onGet(() => this.getHeatMode(HeatMode.BOOST))
+        .onSet((value) => this.setTurboBoost(Boolean(value)));
+    } else this.removeService(Service.Switch, 'turbo-boost');
+
+    for (const service of [this.ecoService, this.fanOnlyService, this.boostService]) {
+      if (service) this.heatService?.addLinkedService?.(service);
+    }
+
     if (controlEnabled(platform.config, 'exposeFlameSpeed')) {
       this.speedService = this.getService(Service.Fanv2, 'Flame Speed', 'flame-speed');
       this.speedService.getCharacteristic(Characteristic.Active)
         .onGet(() => this.getFlameSpeedActive())
         .onSet((value) => this.setFlames(Number(value) !== (Characteristic.Active.INACTIVE ?? 0)));
       const speedCharacteristic = this.speedService.getCharacteristic(Characteristic.RotationSpeed);
+      const speedLabel = this.speedService.getCharacteristic(Characteristic.ConfiguredName)?.value
+        || this.speedService.displayName
+        || 'Flame Speed';
+      // RotationSpeed has a generic built-in name. Supply the service's actual
+      // configured label as characteristic metadata so Home can identify this
+      // otherwise-unlabelled slider while retaining user customisations.
+      speedCharacteristic.displayName = speedLabel;
       speedCharacteristic.updateValue?.(20);
       speedCharacteristic
-        .setProps?.({ minValue: 20, maxValue: 100, minStep: 20 })
+        .setProps?.({ minValue: 20, maxValue: 100, minStep: 20, description: speedLabel })
         .onGet(() => this.getFlameSpeedPercent())
         .onSet((value) => this.setFlameSpeed(Number(value)));
     } else {
@@ -302,6 +346,12 @@ export class FlameConnectAccessory {
         heating ? (C.CurrentHeatingCoolingState.HEAT ?? 1) : (C.CurrentHeatingCoolingState.OFF ?? 0));
       this.heatService.updateCharacteristic(C.TargetTemperature, this.state.heat.setpointTemperature);
       this.heatService.updateCharacteristic(C.CurrentTemperature, this.state.heat.setpointTemperature);
+      this.ecoService?.updateCharacteristic(C.On, this.state.heat.heatMode === HeatMode.ECO);
+      this.fanOnlyService?.updateCharacteristic(C.Active,
+        this.state.heat.heatMode === HeatMode.FAN_ONLY && heating
+          ? (C.Active.ACTIVE ?? 1) : (C.Active.INACTIVE ?? 0));
+      this.boostService?.updateCharacteristic(C.On,
+        this.state.heat.heatMode === HeatMode.BOOST && heating);
     }
     if (this.state.log && this.logService) {
       this.logService.updateCharacteristic(C.On, this.state.log.logEffect === OnOff.ON);
@@ -443,6 +493,76 @@ export class FlameConnectAccessory {
     this.state.heat = await this.platform.client.setHeatTemperature(this.fire.fireId, this.state.heat, value);
     this.lastRefresh = Date.now();
     this.pushStateToHomeKit();
+  }
+
+  async getHeatMode(mode) {
+    await this.ensureFresh();
+    return this.state.heat?.heatMode === mode
+      && (mode === HeatMode.ECO || this.state.heat?.heatStatus === OnOff.ON);
+  }
+
+  rememberPersistentHeatState() {
+    const heat = this.state.heat || {};
+    if ([HeatMode.NORMAL, HeatMode.ECO].includes(heat.heatMode)) {
+      this.accessory.context.previousHeatState = {
+        heatMode: heat.heatMode,
+        heatStatus: heat.heatStatus,
+      };
+    }
+  }
+
+  async setHeatMode(changes) {
+    await this.ensureFresh(true);
+    this.state.heat = await this.platform.client.setHeatMode(this.fire.fireId, this.state.heat, changes);
+    this.lastRefresh = Date.now();
+    this.pushStateToHomeKit();
+  }
+
+  async setEcoMode(on) {
+    await this.setHeatMode({ heatMode: on ? HeatMode.ECO : HeatMode.NORMAL });
+  }
+
+  async setFanOnly(on) {
+    if (on) {
+      await this.ensureFresh(true);
+      this.rememberPersistentHeatState();
+      return this.setHeatMode({ heatMode: HeatMode.FAN_ONLY, heatStatus: OnOff.ON });
+    }
+    const previous = this.accessory.context.previousHeatState || {};
+    return this.setHeatMode({
+      heatMode: [HeatMode.NORMAL, HeatMode.ECO].includes(previous.heatMode)
+        ? previous.heatMode : HeatMode.NORMAL,
+      // Exiting fan-only must never unexpectedly start the heater.
+      heatStatus: OnOff.OFF,
+    });
+  }
+
+  async setTurboBoost(on) {
+    if (on) {
+      await this.ensureFresh(true);
+      this.rememberPersistentHeatState();
+      const duration = Math.min(20, Math.max(1, Number(this.platform.config.turboBoostMinutes || 20)));
+      await this.setHeatMode({
+        heatMode: HeatMode.BOOST,
+        heatStatus: OnOff.ON,
+        boostDuration: duration,
+      });
+      if (this.boostRefreshTimer) clearTimeout(this.boostRefreshTimer);
+      this.boostRefreshTimer = setTimeout(() => {
+        void this.refresh().catch((error) => this.platform.log?.warn?.(
+          `Could not refresh Turbo Boost state: ${error.message}`,
+        ));
+      }, duration * 60_000 + 2_000);
+      this.boostRefreshTimer.unref?.();
+      return;
+    }
+    if (this.boostRefreshTimer) clearTimeout(this.boostRefreshTimer);
+    const previous = this.accessory.context.previousHeatState || {};
+    return this.setHeatMode({
+      heatMode: [HeatMode.NORMAL, HeatMode.ECO].includes(previous.heatMode)
+        ? previous.heatMode : HeatMode.NORMAL,
+      heatStatus: previous.heatStatus === OnOff.ON ? OnOff.ON : OnOff.OFF,
+    });
   }
 
   async getLogs() {

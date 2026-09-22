@@ -34,10 +34,9 @@ export class FlameConnectPlatform {
 
   configureAccessory(accessory) {
     this.accessories.set(accessory.UUID, accessory);
-    const fire = accessory.context?.fire;
-    if (fire?.fireId) {
-      this.attach(accessory, fire);
-    }
+    // Do not construct services from cached capabilities. New plugin versions
+    // may learn additional feature flags (PowerBoost in v0.1.7), and a cached
+    // handler would omit those services before current discovery data arrives.
   }
 
   attach(accessory, fire) {
@@ -71,6 +70,15 @@ export class FlameConnectPlatform {
           this.log.info(`Added Flame Connect fireplace: ${fire.friendlyName}`);
         }
         const handler = this.attach(accessory, fire);
+        const controls = [
+          ['Fireplace', handler.powerService], ['Flames', handler.flameService],
+          ['Heater', handler.heatService], ['Eco Mode', handler.ecoService],
+          ['Fan Only', handler.fanOnlyService], ['Turbo Boost', handler.boostService],
+          ['Flame Speed', handler.speedService], ['Media Bed', handler.mediaService],
+          ['Media Accent', handler.overheadService], ['Logs', handler.logService],
+        ].filter(([, service]) => Boolean(service)).map(([name]) => name);
+        this.log.info(`Exposed HomeKit controls: ${controls.join(', ')}.`);
+        this.log.info(`Capabilities: heat=${Boolean(fire.withHeat)}, advanced heat=${Boolean(fire.features?.advancedHeat)}, eco=${Boolean(fire.features?.advancedHeat)}, fan only=${Boolean(fire.features?.fanOnly)}, turbo boost=${Boolean(fire.features?.powerBoost)}, RGB logs=${Boolean(fire.features?.rgbLogEffect)}.`);
         try {
           await handler.refresh();
           this.log.info(`Ready: ${fire.friendlyName}`);
@@ -94,6 +102,9 @@ export class FlameConnectPlatform {
       this.startPolling();
     } catch (error) {
       this.log.error(`Flame Connect startup failed: ${error.message}`);
+      if (error?.code === 'FLAMECONNECT_REAUTH_REQUIRED') {
+        this.log.error('The saved Flame Connect sign-in is no longer valid. Run flameconnect-auth again; your fireplace configuration is unaffected.');
+      }
       if (!this.config.refreshToken) {
         this.log.error('Run flameconnect-auth once, then add the returned refresh token to this plugin configuration.');
       }

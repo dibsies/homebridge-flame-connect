@@ -11,6 +11,9 @@ Each Flame Connect fireplace is exposed as one HomeKit accessory with separate s
 - Fireplace: main power / standby
 - Flames: flame effect on/off and High/Low brightness
 - Heater: off/heat thermostat and target temperature, when supported
+- Eco Mode: one switch between Eco and Normal without changing thermostat power
+- Fan Only: a dedicated switch when the fireplace reports support
+- Turbo Boost: a timed maximum-output switch when Power Boost is supported
 - Flame Speed: five steps represented as 20–100% in HomeKit
 - Media Bed: on/off, color picker, and brightness
 - Media Accent: on/off, color picker, and brightness
@@ -33,7 +36,13 @@ This means Siri commands can be named naturally, for example:
 
 The plugin does not need to save your Flame Connect email/password. It uses Flame Connect's Azure AD B2C public-client OAuth flow.
 
-### Recommended on macOS
+### Recommended on Homebridge (all platforms)
+
+Open **Plugins → Homebridge Flame Connect → Settings** and use the **Flame Connect Sign-in** card. Enter the email and password used by the official Flame Connect app, then select **Sign in and connect**. The credentials are forwarded over HTTPS to Flame Connect's Microsoft Azure B2C tenant for this one request and immediately discarded. They are never written to the Homebridge configuration, token file, or logs. Only the resulting OAuth refresh token is placed into the plugin configuration; select **Save** and restart Homebridge.
+
+This guided workflow runs in Homebridge UI and therefore works whether you open it from macOS, Windows, or Linux. A browser-based authorization-code flow remains available under **Browser sign-in fallback**, as do the native macOS and terminal helpers below.
+
+### Native macOS alternative
 
 Download `Flame-Connect-Token-Helper-macOS.zip` from the matching GitHub release, unzip it, and open **Flame Connect Token Helper**. It will:
 
@@ -44,13 +53,15 @@ Download `Flame-Connect-Token-Helper-macOS.zip` from the matching GitHub release
 
 No credentials or tokens pass through an external proxy. Paste the copied value into Homebridge → Flame Connect → **Refresh Token**.
 
-### Terminal fallback
+### Cross-platform terminal helper
 
 After installing the package, run:
 
 ```bash
 flameconnect-auth
 ```
+
+The helper runs on macOS, Windows, Linux, and the Homebridge terminal. It attempts to open the default browser automatically; use `--no-open` when the browser is on a different computer.
 
 The helper prints a Microsoft/Azure B2C sign-in URL. Open it in a browser and sign in. At the end, the browser redirects to a URL beginning with:
 
@@ -60,7 +71,13 @@ msal1af761dc-085a-411f-9cb9-53e5e2115bd2://auth
 
 The browser may say it cannot open that URL. Copy the complete URL from the address bar and paste it back into the helper. It will print a refresh token.
 
-Treat the refresh token like a password.
+Treat the refresh token like a password. To save it directly rather than displaying it, use:
+
+```bash
+flameconnect-auth --token-file /absolute/path/flame-connect-tokens.json
+```
+
+Then enter that same path under **Token File (advanced)** in the plugin settings. The plugin automatically persists rotated refresh tokens. Temporary network/server failures are retried; if Flame Connect revokes or expires the refresh token, Homebridge reports that a new sign-in is required without logging the token.
 
 ## Homebridge configuration
 
@@ -68,7 +85,9 @@ Media Bed and Media Accent use the native Apple Home color picker and dimmer. Di
 
 The Heater uses HomeKit's thermostat interface for off/heat and target-temperature control. Flame Connect stores the setpoint in Celsius and HomeKit handles display conversion. The cloud API does not provide measured room temperature, although HomeKit requires that field, so the displayed current temperature mirrors the target and must not be interpreted as a sensor reading.
 
-HomeKit has no generic 1–5 control. Flame Speed therefore uses a native speed slider: 20%, 40%, 60%, 80%, and 100% map to speeds 1, 2, 3, 4, and 5. Its active control mirrors the Flames on/off state.
+Supported advanced heaters add compact controls rather than separate switches for every persistent mode. **Eco Mode** off means Normal. **Fan Only** is represented as a native HomeKit fan power control and exits to a stopped, non-heating state. **Turbo Boost** runs for the configured 1–20 minute duration and then the fireplace returns to its prior Normal/Eco selection. Schedule mode is intentionally not exposed.
+
+HomeKit has no generic 1–5 control. Flame Speed therefore uses a labelled native speed slider: 20%, 40%, 60%, 80%, and 100% map to speeds 1, 2, 3, 4, and 5. Its active control mirrors the Flames on/off state.
 
 Supported Logs effects use the same native color picker and dimmer behavior as the other RGBW lights. Changing Logs color preserves its on/off state.
 
@@ -105,12 +124,12 @@ Writes refresh the fireplace state immediately before changing a multi-field par
 
 ## Installation from a local package on Homebridge Raspberry Pi image
 
-Until this prototype is published to npm, download the generated `.tgz` on the Homebridge machine and install it into the same `/var/lib/homebridge` package tree used by the Homebridge service:
+For a release-candidate test package, download the generated `.tgz` on the Homebridge machine and install it into the same `/var/lib/homebridge` package tree used by the Homebridge service:
 
 ```bash
 cd /tmp
-wget https://github.com/dibsies/homebridge-flame-connect/releases/download/v0.1.5/homebridge-flame-connect-0.1.5.tgz
-/opt/homebridge/bin/npm install --prefix /var/lib/homebridge /tmp/homebridge-flame-connect-0.1.5.tgz
+wget https://github.com/dibsies/homebridge-flame-connect/releases/download/v0.1.7/homebridge-flame-connect-0.1.7.tgz
+/opt/homebridge/bin/npm install --prefix /var/lib/homebridge /tmp/homebridge-flame-connect-0.1.7.tgz
 ```
 
 Do not use `npm install -g` for this Homebridge image: that puts the plugin under `/opt/homebridge/lib/node_modules`, while the service and its locally installed plugins live under `/var/lib/homebridge/node_modules`. Restart Homebridge after installation.
@@ -121,9 +140,9 @@ The package name starts with `homebridge-`, its keywords include `homebridge-plu
 
 ## Limitations
 
-- Main power/flame operation and Media Bed/Media Accent color and dimming have been user-confirmed on one fireplace. The thermostat, Flame Speed, full-color Logs control, and other models still need physical verification.
+- Main power/flame operation, thermostat, Flame Speed, RGBW Logs, and Media Bed/Media Accent color and dimming have been user-confirmed on one fireplace. v0.1.7's heater modes and other fireplace models still need physical verification.
 - Media Bed, Media Accent, and Logs are implemented writes (Flame Effect parameter 322 and Log Effect parameter 370). Unsupported features or rejected commands may prevent a physical effect.
-- Flame color presets, timer, sound, heater presets, and media-theme selection are not exposed as HomeKit controls.
+- Flame color presets, timer, sound, Schedule heat mode, and media-theme selection are not exposed as HomeKit controls.
 - Flame Connect is an unofficial, unversioned cloud API and Dimplex/Glen Dimplex can change it at any time.
 - Because the API is cloud-based, commands require Internet access and may be slower than local HomeKit accessories.
 

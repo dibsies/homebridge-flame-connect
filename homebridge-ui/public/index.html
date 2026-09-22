@@ -1,0 +1,142 @@
+<style>
+  .flame-auth { margin-bottom: 1rem; }
+  .flame-auth .steps { margin: .75rem 0; padding-left: 1.25rem; }
+  .flame-auth textarea { min-height: 6rem; }
+  .flame-auth .status { margin-top: .75rem; }
+  .flame-auth .open-link { display: none; margin-left: .5rem; }
+</style>
+
+<div class="card card-body flame-auth">
+  <h5>Flame Connect Sign-in</h5>
+  <p>Sign in once through Flame Connect. Your email and password are sent only to the Flame Connect Microsoft login and are never stored.</p>
+  <div class="form-group">
+    <label for="authEmail">Flame Connect email</label>
+    <input id="authEmail" type="email" class="form-control" autocomplete="username">
+  </div>
+  <div class="form-group">
+    <label for="authPassword">Flame Connect password</label>
+    <input id="authPassword" type="password" class="form-control" autocomplete="current-password">
+  </div>
+  <button id="credentialAuth" type="button" class="btn btn-primary">Sign in and connect</button>
+  <hr>
+  <details>
+  <summary>Browser sign-in fallback</summary>
+  <ol class="steps">
+    <li>Select <strong>Start sign-in</strong> and complete the Flame Connect login.</li>
+    <li>When the browser reaches an <code>msal…://auth</code> address, copy the complete address.</li>
+    <li>Paste it below and select <strong>Complete sign-in</strong>.</li>
+  </ol>
+  <div>
+    <button id="startAuth" type="button" class="btn btn-primary">Start sign-in</button>
+    <a id="openAuth" class="open-link" target="_blank" rel="noopener">Open sign-in page</a>
+  </div>
+  <div class="form-group mt-3">
+    <label for="redirectUrl">Returned address</label>
+    <textarea id="redirectUrl" class="form-control" autocomplete="off"
+      placeholder="msal…://auth?code=…&amp;state=…"></textarea>
+  </div>
+  <button id="completeAuth" type="button" class="btn btn-success" disabled>Complete sign-in</button>
+  </details>
+  <div id="authStatus" class="status text-muted">Checking current configuration…</div>
+</div>
+
+<script>
+  (async () => {
+    let pluginConfig = await homebridge.getPluginConfig();
+    if (!pluginConfig.length) pluginConfig.push({ platform: 'FlameConnect', name: 'Flame Connect' });
+    let sessionId = '';
+    const status = document.querySelector('#authStatus');
+    const redirect = document.querySelector('#redirectUrl');
+    const complete = document.querySelector('#completeAuth');
+    const openLink = document.querySelector('#openAuth');
+
+    const saveRefreshToken = async (refreshToken) => {
+      pluginConfig[0].platform = 'FlameConnect';
+      pluginConfig[0].name ||= 'Flame Connect';
+      pluginConfig[0].refreshToken = refreshToken;
+      pluginConfig = await homebridge.updatePluginConfig(pluginConfig);
+      status.textContent = 'Sign-in succeeded. Select Save to apply the new token, then restart Homebridge.';
+      homebridge.toast.success('Select Save to apply the new sign-in.', 'Flame Connect connected');
+    };
+
+    const updateStatus = () => {
+      status.textContent = pluginConfig[0]?.refreshToken
+        ? 'A Flame Connect sign-in is configured. Start again only to replace or repair it.'
+        : 'No Flame Connect sign-in is currently saved in this configuration.';
+    };
+    updateStatus();
+    homebridge.showSchemaForm();
+    window.homebridge.addEventListener('configChanged', (event) => {
+      pluginConfig = event.data;
+      updateStatus();
+    });
+
+    redirect.addEventListener('input', () => {
+      complete.disabled = !sessionId || !redirect.value.trim();
+    });
+
+    document.querySelector('#credentialAuth').addEventListener('click', async () => {
+      const emailInput = document.querySelector('#authEmail');
+      const passwordInput = document.querySelector('#authPassword');
+      const email = emailInput.value.trim();
+      const password = passwordInput.value;
+      if (!email || !password) {
+        homebridge.toast.error('Enter your Flame Connect email and password.', 'Missing credentials');
+        return;
+      }
+      homebridge.showSpinner();
+      try {
+        const response = await homebridge.request('/auth/credentials', { email, password });
+        await saveRefreshToken(response.refreshToken);
+        emailInput.value = '';
+      } catch (error) {
+        homebridge.toast.error(error.error?.message || error.message, error.message || 'Sign-in failed');
+        status.textContent = 'Sign-in failed. Check the credentials and try again, or use the browser fallback.';
+      } finally {
+        // Remove credentials from the page as soon as the request completes.
+        passwordInput.value = '';
+        homebridge.hideSpinner();
+      }
+    });
+
+    document.querySelector('#startAuth').addEventListener('click', async () => {
+      const popup = window.open('about:blank', '_blank');
+      homebridge.showSpinner();
+      try {
+        const response = await homebridge.request('/auth/start', {});
+        sessionId = response.sessionId;
+        openLink.href = response.authorizationUrl;
+        openLink.style.display = 'inline';
+        complete.disabled = !redirect.value.trim();
+        if (popup) popup.location = response.authorizationUrl;
+        status.textContent = 'Sign-in started. Paste the complete returned address below.';
+      } catch (error) {
+        popup?.close();
+        homebridge.toast.error(error.error?.message || error.message, 'Could not start sign-in');
+      } finally {
+        homebridge.hideSpinner();
+      }
+    });
+
+    complete.addEventListener('click', async () => {
+      homebridge.showSpinner();
+      complete.disabled = true;
+      try {
+        const response = await homebridge.request('/auth/complete', {
+          sessionId,
+          redirectUrl: redirect.value.trim(),
+        });
+        await saveRefreshToken(response.refreshToken);
+        sessionId = '';
+        redirect.value = '';
+        openLink.style.display = 'none';
+      } catch (error) {
+        sessionId = '';
+        homebridge.toast.error(error.error?.message || error.message, error.message || 'Sign-in failed');
+        status.textContent = 'Sign-in failed. Start a new sign-in session and try again.';
+      } finally {
+        homebridge.hideSpinner();
+      }
+    });
+  })();
+</script>

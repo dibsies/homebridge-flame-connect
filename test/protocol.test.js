@@ -31,11 +31,11 @@ test('flame packet preserves all multi-field values', () => {
 
 test('heat and log packets round trip', () => {
   const heat = decodeParameter(ParameterId.HEAT_SETTINGS, encodeHeat({
-    heatStatus: OnOff.ON, heatMode: 2, setpointTemperature: 19.5, boostDuration: 30,
+    heatStatus: OnOff.ON, heatMode: 2, setpointTemperature: 19.5, boostDuration: 20,
   }));
   assert.deepEqual(heat, {
     type: 'heat', heatStatus: OnOff.ON, heatMode: 2,
-    setpointTemperature: 19.5, boostDuration: 30,
+    setpointTemperature: 19.5, boostDuration: 20,
   });
 
   const log = decodeParameter(ParameterId.LOG_EFFECT, encodeLog({
@@ -44,6 +44,13 @@ test('heat and log packets round trip', () => {
   assert.equal(log.logEffect, OnOff.ON);
   assert.deepEqual(log.color, { red: 9, blue: 8, green: 7, white: 6 });
   assert.equal(log.pattern, 4);
+});
+
+test('heat writes use the authoritative five-byte payload layout', () => {
+  const bytes = packetBytes(encodeHeat({
+    heatStatus: OnOff.ON, heatMode: 3, setpointTemperature: 22.5, boostDuration: 20,
+  }));
+  assert.deepEqual([...bytes], [0x43, 0x01, 0x05, 0x01, 0x03, 0x16, 0x05, 0x13]);
 });
 
 test('encoded packet header contains parameter and payload length', () => {

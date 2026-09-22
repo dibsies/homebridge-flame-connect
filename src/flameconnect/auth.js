@@ -18,6 +18,14 @@ function base64Url(buffer) {
     .replace(/=+$/u, '');
 }
 
+export class FlameConnectReauthenticationRequiredError extends Error {
+  constructor(message = 'The Flame Connect sign-in has expired or was revoked. Run flameconnect-auth again.') {
+    super(message);
+    this.name = 'FlameConnectReauthenticationRequiredError';
+    this.code = 'FLAMECONNECT_REAUTH_REQUIRED';
+  }
+}
+
 export function createPkce() {
   const verifier = base64Url(randomBytes(48));
   const challenge = base64Url(createHash('sha256').update(verifier).digest());
@@ -49,6 +57,9 @@ export function buildAuthorizationRequest() {
 
 export function parseAuthorizationRedirect(input, expectedState) {
   const value = String(input).trim();
+  if (value.includes('\u2026') || value.includes('...')) {
+    throw new Error('The redirect address appears truncated. Copy the full address from the browser address bar.');
+  }
   const question = value.indexOf('?');
   const hash = value.indexOf('#');
   const separator = question >= 0 ? question : hash;
@@ -71,12 +82,26 @@ export function parseAuthorizationRedirect(input, expectedState) {
   return code;
 }
 
+const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
 async function tokenRequest(fields) {
-  const response = await fetch(TOKEN_ENDPOINT, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams(fields),
-  });
+  let response;
+  let lastError;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      response = await fetch(TOKEN_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams(fields),
+      });
+      if (![429, 500, 502, 503, 504].includes(response.status)) break;
+      lastError = new Error(`OAuth HTTP ${response.status}`);
+    } catch (error) {
+      lastError = error;
+    }
+    if (attempt < 2) await delay(250 * (2 ** attempt));
+  }
+  if (!response) throw new Error(`Could not reach Flame Connect authentication: ${lastError?.message || 'network error'}`);
   const text = await response.text();
   let data;
   try {
@@ -85,6 +110,9 @@ async function tokenRequest(fields) {
     throw new Error(`Flame Connect token endpoint returned HTTP ${response.status}: ${text}`);
   }
   if (!response.ok || data.error) {
+    if (data.error === 'invalid_grant' || data.error === 'interaction_required') {
+      throw new FlameConnectReauthenticationRequiredError();
+    }
     throw new Error(data.error_description || data.error || `OAuth HTTP ${response.status}`);
   }
   return data;
@@ -169,7 +197,17 @@ export class FlameConnectAuth {
         'No Flame Connect refresh token is configured. Run flameconnect-auth and paste its refresh token into the Homebridge plugin settings.',
       );
     }
-    const data = await exchangeRefreshToken(this.state.refreshToken);
+    let data;
+    try {
+      data = await exchangeRefreshToken(this.state.refreshToken);
+    } catch (error) {
+      if (error?.code === 'FLAMECONNECT_REAUTH_REQUIRED') {
+        this.state.accessToken = '';
+        this.state.expiresAt = 0;
+        await this.save();
+      }
+      throw error;
+    }
     this.state.accessToken = data.access_token;
     this.state.refreshToken = data.refresh_token || this.state.refreshToken;
     this.state.expiresAt = Date.now() + Math.max(60, Number(data.expires_in || 3600)) * 1000;

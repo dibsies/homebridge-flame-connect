@@ -3,6 +3,7 @@ import {
   Brightness,
   DEFAULT_HEADERS,
   FireMode,
+  HeatMode,
   OnOff,
   ParameterId,
 } from './constants.js';
@@ -21,6 +22,7 @@ function parseFeatures(data = {}) {
     mediaAccent: Boolean(data.MediaAccent),
     rgbLogEffect: Boolean(data.RgbLogEffect),
     fanOnly: Boolean(data.FanOnly),
+    powerBoost: Boolean(data.PowerBoost),
   };
 }
 
@@ -163,6 +165,13 @@ export class FlameConnectClient {
     return next;
   }
 
+  async setHeatMode(fireId, current, changes) {
+    if (!current) throw new Error('This fireplace did not report Heat Settings parameter 323.');
+    const next = { ...current, ...changes };
+    await this.writeParameters(fireId, [{ parameterId: ParameterId.HEAT_SETTINGS, value: encodeHeat(next) }]);
+    return next;
+  }
+
   async setFlameSpeed(fireId, current, speed) {
     if (!current) throw new Error('This fireplace did not report Flame Effect parameter 322.');
     const next = { ...current, flameSpeed: Math.min(5, Math.max(1, Math.round(Number(speed)))) };
@@ -185,4 +194,4 @@ export class FlameConnectClient {
   }
 }
 
-export { Brightness, FireMode, OnOff };
+export { Brightness, FireMode, HeatMode, OnOff };

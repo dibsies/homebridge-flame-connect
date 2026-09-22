@@ -53,14 +53,15 @@ function fixture(config = {}, accessory) {
     for (const e of entries) {const p=decodeParameter(e.parameterId,e.value); remote[p.type]=p;}
   };
   const platform = {config, Service, Characteristic, client, api:{updatePlatformAccessories(){}}};
-  const handler = new FlameConnectAccessory(platform, accessory, {fireId:'test', friendlyName:'Living Room Fire', withHeat:true, features:{rgbLogEffect:true}});
+  const handler = new FlameConnectAccessory(platform, accessory, {fireId:'test', friendlyName:'Living Room Fire', withHeat:true,
+    features:{advancedHeat:true,fanOnly:true,powerBoost:true,rgbLogEffect:true}});
   return {handler, accessory, client, remote:()=>remote};
 }
 
 test('configured names survive refresh and Home renames survive restart; config changes apply once', async () => {
   const f=fixture({flamesName:'Cozy Flames'});
   assert.deepEqual(f.accessory.services.map(s=>s.displayName),
-    ['Fireplace','Cozy Flames','Heater','Flame Speed','Media Bed','Media Accent','Logs']);
+    ['Fireplace','Cozy Flames','Heater','Eco Mode','Fan Only','Turbo Boost','Flame Speed','Media Bed','Media Accent','Logs']);
   f.handler.flameService.setCharacteristic('ConfiguredName','Evening Glow');
   await f.handler.refresh();
   f.handler.updateFire({friendlyName:'New account name'},true);
@@ -124,6 +125,38 @@ test('thermostat sets heat state and half-degree target temperature', async () =
   assert.equal(f.handler.heatService.getCharacteristic(f.handler.platform.Characteristic.TargetTemperature).props.minStep,0.5);
 });
 
+test('heater modes use one switch each and restore safe Normal or Eco state', async () => {
+  const f=fixture({turboBoostMinutes:12});
+  assert.equal(f.handler.fanOnlyService.UUID,f.handler.platform.Service.Fanv2.UUID);
+  await f.handler.setEcoMode(true);
+  assert.equal(f.remote().heat.heatMode,2);
+  assert.equal(f.remote().heat.heatStatus,0);
+  await f.handler.setFanOnly(true);
+  assert.equal(f.remote().heat.heatMode,3);
+  assert.equal(f.remote().heat.heatStatus,1);
+  await f.handler.setFanOnly(false);
+  assert.equal(f.remote().heat.heatMode,2);
+  assert.equal(f.remote().heat.heatStatus,0);
+  await f.handler.setTurboBoost(true);
+  assert.equal(f.remote().heat.heatMode,1);
+  assert.equal(f.remote().heat.boostDuration,12);
+  await f.handler.setTurboBoost(false);
+  assert.equal(f.remote().heat.heatMode,2);
+  assert.equal(f.remote().heat.heatStatus,0);
+});
+
+test('unsupported heater controls are not exposed', () => {
+  const f=fixture({}, undefined);
+  f.handler.fire.features={advancedHeat:false,fanOnly:false,powerBoost:false,rgbLogEffect:true};
+  // Capability gating occurs at construction; construct against a separate accessory.
+  const accessory={...f.accessory,context:{},services:[]};
+  const handler=new FlameConnectAccessory(f.handler.platform,accessory,
+    {fireId:'basic',friendlyName:'Basic',withHeat:true,features:{}});
+  assert.equal(handler.ecoService,undefined);
+  assert.equal(handler.fanOnlyService,undefined);
+  assert.equal(handler.boostService,undefined);
+});
+
 test('logs support RGBW color and brightness without changing their on state', async () => {
   const f=fixture();
   await f.handler.setLogs(true);
@@ -134,13 +167,15 @@ test('logs support RGBW color and brightness without changing their on state', a
   assert.equal(f.remote().log.logEffect,1);
 });
 
-test('flame speed maps native five-step values to a HomeKit percentage slider', async () => {
-  const f=fixture();
+test('flame speed maps native five-step values to a labelled HomeKit percentage slider', async () => {
+  const f=fixture({flameSpeedName:'Flame Motion'});
   await f.handler.setFlameSpeed(61);
   assert.equal(f.remote().flame.flameSpeed,3);
   assert.equal(await f.handler.getFlameSpeedPercent(),60);
-  assert.deepEqual(f.handler.speedService.getCharacteristic(f.handler.platform.Characteristic.RotationSpeed).props,
-    {minValue:20,maxValue:100,minStep:20});
+  const speed=f.handler.speedService.getCharacteristic(f.handler.platform.Characteristic.RotationSpeed);
+  assert.equal(speed.displayName,'Flame Motion');
+  assert.deepEqual(speed.props,
+    {minValue:20,maxValue:100,minStep:20,description:'Flame Motion'});
 });
 
 test('default migration preserves a Home custom name', () => {

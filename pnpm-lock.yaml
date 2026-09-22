@@ -7,6 +7,10 @@ settings:
 importers:
 
   .:
+    dependencies:
+      '@homebridge/plugin-ui-utils':
+        specifier: ^2.2.6
+        version: 2.2.6
     devDependencies:
       homebridge:
         specifier: ^2.4.0
@@ -25,6 +29,9 @@ packages:
   '@homebridge/hap-nodejs@2.2.2':
     resolution: {integrity: sha512-drTJSn63wGn5R6sDLmgjJdIW7G1awn1CxEEW1Jn+t3oCTMGSlk7lBZjGYbOpeL6acjiBqXNdo79NWcXn7s4CnQ==}
     engines: {node: ^22 || ^24 || ^26}
+
+  '@homebridge/plugin-ui-utils@2.2.6':
+    resolution: {integrity: sha512-RQggRK/c8goET+yPCoh+UhlmY/LblZ+JLOC7qsrazsjy2nB5fvSfobOADIdNExV+B2H2UZvpw8Mizo78OtjXZQ==}
 
   '@leichtgewicht/ip-codec@2.0.5':
     resolution: {integrity: sha512-Vo+PSpZG2/fmgmiNzYK9qWRh8h/CHrwD0mo1h1DzL4yzHNSfWYujGTYsWGreD000gcgmZ7K4Ys6Tx9TxtsKdDw==}
@@ -234,6 +241,8 @@ snapshots:
       tweetnacl: 1.0.3
     transitivePeerDependencies:
       - supports-color
+
+  '@homebridge/plugin-ui-utils@2.2.6': {}
 
   '@leichtgewicht/ip-codec@2.0.5': {}
 

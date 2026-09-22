@@ -2,6 +2,7 @@
   "pluginAlias": "FlameConnect",
   "pluginType": "platform",
   "singular": true,
+  "customUi": true,
   "strictValidation": false,
   "schema": {
     "type": "object",
@@ -14,9 +15,9 @@
         "default": "Flame Connect"
       },
       "refreshToken": {
-        "title": "Flame Connect Refresh Token",
+        "title": "Flame Connect Refresh Token (manual fallback)",
         "type": "string",
-        "description": "Run the included flameconnect-auth helper once, then paste the refresh token here. After first successful startup, the plugin stores rotated tokens in Homebridge storage.",
+        "description": "Normally use the guided sign-in above. This field remains available for tokens obtained with flameconnect-auth. Rotated tokens are stored in Homebridge storage.",
         "format": "password"
       },
       "tokenFile": {
@@ -64,6 +65,32 @@
         "default": true,
         "description": "Show a five-step HomeKit speed slider. 20%, 40%, 60%, 80%, and 100% correspond to Flame Connect speeds 1 through 5."
       },
+      "exposeEcoMode": {
+        "title": "Expose Eco Mode",
+        "type": "boolean",
+        "default": true,
+        "description": "Show one Eco Mode switch when advanced heat is supported. Off selects Normal mode without changing whether the thermostat is on."
+      },
+      "exposeFanOnly": {
+        "title": "Expose Fan Only",
+        "type": "boolean",
+        "default": true,
+        "description": "Show Fan Only when the fireplace reports support. Turning it off stops the fan and will not unexpectedly start heat."
+      },
+      "exposeTurboBoost": {
+        "title": "Expose Turbo Boost",
+        "type": "boolean",
+        "default": true,
+        "description": "Show a single timed Turbo Boost switch when the fireplace reports Power Boost support."
+      },
+      "turboBoostMinutes": {
+        "title": "Turbo Boost Duration",
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 20,
+        "default": 20,
+        "description": "Number of minutes requested when Turbo Boost is turned on."
+      },
       "exposeMediaLight": {
         "title": "Expose Media Bed",
         "type": "boolean",
@@ -105,6 +132,21 @@
         "type": "string",
         "default": "Flame Speed",
         "description": "Applied when this setting changes and Homebridge restarts. Later Apple Home renames are preserved."
+      },
+      "ecoModeName": {
+        "title": "Eco Mode control name",
+        "type": "string",
+        "default": "Eco Mode"
+      },
+      "fanOnlyName": {
+        "title": "Fan Only control name",
+        "type": "string",
+        "default": "Fan Only"
+      },
+      "turboBoostName": {
+        "title": "Turbo Boost control name",
+        "type": "string",
+        "default": "Turbo Boost"
       },
       "mediaLightName": {
         "title": "Media Bed control name",
@@ -152,6 +194,10 @@
     "exposePower",
     "exposeFlames",
     "exposeHeater",
+    "exposeEcoMode",
+    "exposeFanOnly",
+    "exposeTurboBoost",
+    "turboBoostMinutes",
     "exposeFlameSpeed",
     "exposeMediaLight",
     "exposeOverheadLight",
@@ -160,6 +206,9 @@
     "powerName",
     "flamesName",
     "heaterName",
+    "ecoModeName",
+    "fanOnlyName",
+    "turboBoostName",
     "flameSpeedName",
     "mediaLightName",
     "overheadName",
