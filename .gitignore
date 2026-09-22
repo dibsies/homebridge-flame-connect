@@ -1,0 +1,28 @@
+# Dependencies
+node_modules/
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS artifacts
+.DS_Store
+Thumbs.db
+
+# Local packaging
+*.tgz
+*.zip
+
+# pnpm is this repo's package manager; never commit npm's lockfile
+package-lock.json
+
+# Unpacked sources and build outputs
+source/
+macos-helper/build/
+
+# Local npm credentials (never commit tokens)
+.npmrc
+
+# Editor directories
+.idea/
+.vscode/

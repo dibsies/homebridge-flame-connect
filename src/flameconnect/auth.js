@@ -84,6 +84,11 @@ export function parseAuthorizationRedirect(input, expectedState) {
 
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
+// Authentication calls get a slightly longer budget than API commands: the
+// token endpoint occasionally pauses before responding, and a slow sign-in
+// must not wedge the whole plugin.
+const AUTH_REQUEST_TIMEOUT_MS = 20_000;
+
 async function tokenRequest(fields) {
   let response;
   let lastError;
@@ -93,6 +98,7 @@ async function tokenRequest(fields) {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: new URLSearchParams(fields),
+        signal: AbortSignal.timeout(AUTH_REQUEST_TIMEOUT_MS),
       });
       if (![429, 500, 502, 503, 504].includes(response.status)) break;
       lastError = new Error(`OAuth HTTP ${response.status}`);
@@ -101,19 +107,36 @@ async function tokenRequest(fields) {
     }
     if (attempt < 2) await delay(250 * (2 ** attempt));
   }
-  if (!response) throw new Error(`Could not reach Flame Connect authentication: ${lastError?.message || 'network error'}`);
+  if (!response) {
+    // The token endpoint was unreachable on every attempt: a transient
+    // network failure, so mark it for HomeKit communication-error mapping
+    // rather than leaving a generic error.
+    const error = new Error(`Could not reach Flame Connect authentication: ${lastError?.message || 'network error'}`);
+    error.code = 'FLAMECONNECT_CLOUD_ERROR';
+    throw error;
+  }
   const text = await response.text();
   let data;
   try {
     data = JSON.parse(text);
   } catch {
-    throw new Error(`Flame Connect token endpoint returned HTTP ${response.status}: ${text}`);
+    // The endpoint answered but not with JSON: a cloud-side problem, so
+    // classify it deliberately rather than leaving a generic SyntaxError.
+    const error = new Error(`Flame Connect token endpoint returned HTTP ${response.status}: ${text}`);
+    error.code = 'FLAMECONNECT_CLOUD_ERROR';
+    throw error;
   }
   if (!response.ok || data.error) {
     if (data.error === 'invalid_grant' || data.error === 'interaction_required') {
       throw new FlameConnectReauthenticationRequiredError();
     }
-    throw new Error(data.error_description || data.error || `OAuth HTTP ${response.status}`);
+    const error = new Error(data.error_description || data.error || `OAuth HTTP ${response.status}`);
+    // 429/5xx after retries is a transient cloud problem; other OAuth errors
+    // (e.g. invalid_client) are configuration problems and stay unmarked.
+    if ([429, 500, 502, 503, 504].includes(response.status)) {
+      error.code = 'FLAMECONNECT_CLOUD_ERROR';
+    }
+    throw error;
   }
   return data;
 }
@@ -145,6 +168,14 @@ export class FlameConnectAuth {
     this.tokenFile = tokenFile;
     this.log = log;
     this.loaded = false;
+    // Shared in-flight token-file load. load() is asynchronous: without this,
+    // a concurrent caller observes `loaded` while the first caller is still
+    // reading the file, skips the read, and proceeds with empty state.
+    this.loadPromise = null;
+    // Shared in-flight refresh. Azure rotates refresh tokens on use, so two
+    // concurrent refreshes can race and invalidate each other; every caller
+    // while a refresh is running joins the same promise instead.
+    this.refreshPromise = null;
     this.state = {
       accessToken: '',
       refreshToken: '',
@@ -154,7 +185,15 @@ export class FlameConnectAuth {
 
   async load() {
     if (this.loaded) return;
-    this.loaded = true;
+    if (!this.loadPromise) {
+      this.loadPromise = this.performLoad().finally(() => {
+        this.loadPromise = null;
+      });
+    }
+    await this.loadPromise;
+  }
+
+  async performLoad() {
     if (this.tokenFile) {
       try {
         const stored = JSON.parse(await readFile(this.tokenFile, 'utf8'));
@@ -170,6 +209,7 @@ export class FlameConnectAuth {
     if (!this.state.refreshToken && this.configRefreshToken) {
       this.state.refreshToken = this.configRefreshToken;
     }
+    this.loaded = true;
   }
 
   async save() {
@@ -193,10 +233,23 @@ export class FlameConnectAuth {
       return this.state.accessToken;
     }
     if (!this.state.refreshToken) {
-      throw new Error(
+      const error = new Error(
         'No Flame Connect refresh token is configured. Run flameconnect-auth and paste its refresh token into the Homebridge plugin settings.',
       );
+      // Permanent configuration state, not a transient failure: callers use
+      // this code to avoid retrying something that needs user action.
+      error.code = 'FLAMECONNECT_NO_TOKEN';
+      throw error;
     }
+    if (!this.refreshPromise) {
+      this.refreshPromise = this.performRefresh().finally(() => {
+        this.refreshPromise = null;
+      });
+    }
+    return this.refreshPromise;
+  }
+
+  async performRefresh() {
     let data;
     try {
       data = await exchangeRefreshToken(this.state.refreshToken);

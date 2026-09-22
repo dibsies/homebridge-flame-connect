@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
 
-import { buildAuthorizationRequest, exchangeRefreshToken, parseAuthorizationRedirect } from '../src/flameconnect/auth.js';
+import { FlameConnectAuth, buildAuthorizationRequest, exchangeRefreshToken, parseAuthorizationRedirect } from '../src/flameconnect/auth.js';
 
 test('authorization request mirrors the upstream MSAL OIDC flow', () => {
   const request = buildAuthorizationRequest();
@@ -34,4 +37,119 @@ test('redirect parser accepts matching state and rejects mismatches', () => {
     () => parseAuthorizationRedirect('msal-test://auth?code=abc&state=wrong', 'right'),
     /state mismatch/u,
   );
+});
+
+test('concurrent token refreshes share a single network call', async () => {
+  const original = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    return {
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ access_token: 'tok', refresh_token: 'rt2', expires_in: 3600 }),
+    };
+  };
+  try {
+    const auth = new FlameConnectAuth({ refreshToken: 'rt', tokenFile: null });
+    const [first, second, third] = await Promise.all([
+      auth.getAccessToken(true),
+      auth.getAccessToken(true),
+      auth.getAccessToken(true),
+    ]);
+    assert.equal(first, 'tok');
+    assert.equal(second, 'tok');
+    assert.equal(third, 'tok');
+    assert.equal(calls, 1);
+    assert.equal(auth.state.refreshToken, 'rt2');
+    // A later forced refresh starts a new network call once the first settles.
+    await auth.getAccessToken(true);
+    assert.equal(calls, 2);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('token endpoint requests carry an abort timeout signal', async () => {
+  const original = globalThis.fetch;
+  let seen;
+  globalThis.fetch = async (url, options) => {
+    seen = options;
+    return {
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ access_token: 'a', refresh_token: 'r', expires_in: 3600 }),
+    };
+  };
+  try {
+    const data = await exchangeRefreshToken('rt');
+    assert.equal(data.access_token, 'a');
+    assert.ok(seen.signal instanceof AbortSignal);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('concurrent load() calls share a single in-flight token file read', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'flame-load-'));
+  const tokenFile = path.join(dir, 'tokens.json');
+  await writeFile(tokenFile, JSON.stringify({ accessToken: '', refreshToken: 'file-rt', expiresAt: 0 }));
+  const warnings = [];
+  try {
+    const auth = new FlameConnectAuth({ tokenFile, log: { warn: (m) => warnings.push(m) } });
+    const first = auth.load();
+    // The second caller must join the in-flight read, not observe `loaded`
+    // and proceed with empty state while the file is still being read.
+    await auth.load();
+    assert.equal(auth.state.refreshToken, 'file-rt');
+    await first;
+    assert.equal(auth.state.refreshToken, 'file-rt');
+    assert.deepEqual(warnings, []);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a missing refresh token is a permanent configuration error, not a cloud error', async () => {
+  const auth = new FlameConnectAuth({ tokenFile: null });
+  await assert.rejects(
+    auth.getAccessToken(),
+    (error) => error.code === 'FLAMECONNECT_NO_TOKEN' && /flameconnect-auth/.test(error.message),
+  );
+});
+
+test('an unreachable token endpoint is marked as a cloud error', async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = async () => {
+    throw new TypeError('fetch failed', {
+      cause: Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' }),
+    });
+  };
+  try {
+    await assert.rejects(
+      exchangeRefreshToken('rt'),
+      (error) => error.code === 'FLAMECONNECT_CLOUD_ERROR' && /Could not reach/.test(error.message),
+    );
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('repeated token endpoint HTTP 503s are marked as cloud errors', async () => {
+  const original = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return { ok: false, status: 503, text: async () => 'down' };
+  };
+  try {
+    await assert.rejects(
+      exchangeRefreshToken('rt'),
+      (error) => error.code === 'FLAMECONNECT_CLOUD_ERROR',
+    );
+    assert.equal(calls, 3);
+  } finally {
+    globalThis.fetch = original;
+  }
 });

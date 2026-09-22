@@ -9,6 +9,45 @@ import {
 } from './constants.js';
 import { decodeParameter, encodeFlame, encodeHeat, encodeLog, encodeMode } from './protocol.js';
 
+// A single API command must never block a fireplace's whole command queue
+// indefinitely: a hung cloud call fails fast and the caller sees a proper
+// HomeKit communication error instead of a spinning tile.
+const API_REQUEST_TIMEOUT_MS = 15_000;
+
+// True for failures talking to the Flame Connect cloud (network errors,
+// timeouts, HTTP error responses, rejected tokens) as opposed to local
+// validation errors. Used to translate cloud problems into HomeKit
+// communication errors instead of generic failures.
+// fetch() signals network failures with a TypeError, but a bare
+// `instanceof TypeError` would also swallow programming defects. Only treat it
+// as a cloud error when it carries a system cause code (ECONNREFUSED,
+// ETIMEDOUT, UND_ERR_CONNECT_TIMEOUT, ...), which is how the network stack
+// reports the underlying failure.
+function isFetchNetworkError(error) {
+  return (
+    error instanceof TypeError
+    && typeof error.cause?.code === 'string'
+    && error.cause.code.length > 0
+  );
+}
+
+export function isCloudError(error) {
+  if (!error || typeof error !== 'object') return false;
+  return (
+    error.code === 'FLAMECONNECT_CLOUD_ERROR'
+    || error.code === 'FLAMECONNECT_REAUTH_REQUIRED'
+    || error.name === 'AbortError'
+    || isFetchNetworkError(error)
+  );
+}
+
+function markCloudError(error) {
+  if (error && typeof error === 'object' && !error.code) {
+    error.code = 'FLAMECONNECT_CLOUD_ERROR';
+  }
+  return error;
+}
+
 function parseFeatures(data = {}) {
   return {
     sound: Boolean(data.Sound),
@@ -48,26 +87,52 @@ export class FlameConnectClient {
   }
 
   async request(method, route, body, retried = false) {
-    const token = await this.auth.getAccessToken();
-    const response = await fetch(`${API_BASE}${route}`, {
-      method,
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-        ...DEFAULT_HEADERS,
-      },
-      body: body === undefined ? undefined : JSON.stringify(body),
-    });
-    const text = await response.text();
+    // Token acquisition is part of the cloud call: a dead token endpoint must
+    // surface as a communication failure, not a generic error. markCloudError
+    // preserves existing codes, so FLAMECONNECT_REAUTH_REQUIRED still means
+    // "the user must sign in again".
+    let token;
+    try {
+      token = await this.auth.getAccessToken();
+    } catch (error) {
+      throw markCloudError(error);
+    }
+    let response;
+    try {
+      response = await fetch(`${API_BASE}${route}`, {
+        method,
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+          ...DEFAULT_HEADERS,
+        },
+        body: body === undefined ? undefined : JSON.stringify(body),
+        signal: AbortSignal.timeout(API_REQUEST_TIMEOUT_MS),
+      });
+    } catch (error) {
+      throw markCloudError(error);
+    }
+    let text;
+    try {
+      text = await response.text();
+    } catch (error) {
+      throw markCloudError(error);
+    }
     if (!response.ok) {
       if (response.status === 401 && !retried) {
         await this.auth.getAccessToken(true);
         return this.request(method, route, body, true);
       }
-      throw new Error(`Flame Connect API ${method} ${route} failed (${response.status}): ${text}`);
+      throw markCloudError(new Error(`Flame Connect API ${method} ${route} failed (${response.status}): ${text}`));
     }
     if (!text) return null;
-    return JSON.parse(text);
+    try {
+      return JSON.parse(text);
+    } catch {
+      throw markCloudError(
+        new Error(`Flame Connect API ${method} ${route} returned a response that was not valid JSON.`),
+      );
+    }
   }
 
   async getFires() {

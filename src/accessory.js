@@ -1,4 +1,4 @@
-import { Brightness, FireMode, HeatMode, OnOff } from './flameconnect/client.js';
+import { Brightness, FireMode, HeatMode, OnOff, isCloudError } from './flameconnect/client.js';
 import { hsvToRgbw, rgbwToHsv } from './flameconnect/color.js';
 
 export const CONTROL_NAMES = {
@@ -66,7 +66,9 @@ export class FlameConnectAccessory {
       'setLogs', 'setLightColor', 'setLogColor']) {
       const operation = this[method].bind(this);
       this[method] = (...args) => {
-        const pending = this.commandQueue.then(() => operation(...args));
+        const pending = this.commandQueue
+          .then(() => operation(...args))
+          .catch((error) => { throw this.toHapError(error); });
         this.commandQueue = pending.catch(() => {});
         return pending;
       };
@@ -302,15 +304,32 @@ export class FlameConnectAccessory {
     return this.refresh();
   }
 
+  // Cloud and network failures become HomeKit communication errors so the
+  // Home app shows "No Response" instead of silently keeping stale state.
+  // Local validation errors pass through unchanged.
+  toHapError(error) {
+    const hap = this.platform?.api?.hap;
+    if (!hap?.HapStatusError || !hap?.HAPStatus) return error;
+    if (error instanceof hap.HapStatusError) return error;
+    if (isCloudError(error)) {
+      return new hap.HapStatusError(hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE);
+    }
+    return error;
+  }
+
   async refresh() {
     if (this.refreshPromise) return this.refreshPromise;
     this.refreshPromise = (async () => {
-      const overview = await this.platform.client.getFireOverview(this.fire.fireId);
-      this.state = overview.parameters;
-      this.lastRefresh = Date.now();
-      if (overview.fire) this.updateFire(overview.fire);
-      this.pushStateToHomeKit();
-      return this.state;
+      try {
+        const overview = await this.platform.client.getFireOverview(this.fire.fireId);
+        this.state = overview.parameters;
+        this.lastRefresh = Date.now();
+        if (overview.fire) this.updateFire(overview.fire);
+        this.pushStateToHomeKit();
+        return this.state;
+      } catch (error) {
+        throw this.toHapError(error);
+      }
     })().finally(() => {
       this.refreshPromise = null;
     });
