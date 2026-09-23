@@ -4,6 +4,24 @@ import { FlameConnectAuth } from './flameconnect/auth.js';
 import { FlameConnectClient } from './flameconnect/client.js';
 import { PLATFORM_NAME, PLUGIN_NAME } from './settings.js';
 
+export async function mapWithConcurrency(items, limit, worker) {
+  const results = new Array(items.length);
+  let index = 0;
+  const runners = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (index < items.length) {
+      const current = index;
+      index += 1;
+      try {
+        results[current] = { status: 'fulfilled', value: await worker(items[current], current) };
+      } catch (reason) {
+        results[current] = { status: 'rejected', reason };
+      }
+    }
+  });
+  await Promise.all(runners);
+  return results;
+}
+
 export class FlameConnectPlatform {
   constructor(log, config, api) {
     this.log = log;
@@ -19,6 +37,8 @@ export class FlameConnectPlatform {
     // to refresh, so discovery itself retries on a bounded backoff schedule.
     this.discoveryTimer = null;
     this.discoveryAttempts = 0;
+    this.refreshAllPromise = null;
+    this.authenticationBlocked = false;
 
     const storagePath = api.user.storagePath();
     const tokenFile = this.config.tokenFile || path.join(storagePath, 'flame-connect-tokens.json');
@@ -34,7 +54,9 @@ export class FlameConnectPlatform {
     });
     api.on('shutdown', () => {
       if (this.pollTimer) clearInterval(this.pollTimer);
+      this.pollTimer = null;
       this.clearDiscoveryRetry();
+      for (const handler of this.handlers.values()) handler.dispose();
     });
   }
 
@@ -63,6 +85,7 @@ export class FlameConnectPlatform {
       this.log.info('Connecting to Flame Connect...');
       const fires = await this.client.getFires();
       const discovered = new Set();
+      const refreshes = [];
 
       for (const fire of fires) {
         const uuid = this.api.hap.uuid.generate(`flameconnect:${fire.fireId}`);
@@ -85,17 +108,24 @@ export class FlameConnectPlatform {
         ].filter(([, service]) => Boolean(service)).map(([name]) => name);
         this.log.info(`Exposed HomeKit controls: ${controls.join(', ')}.`);
         this.log.info(`Capabilities: heat=${Boolean(fire.withHeat)}, advanced heat=${Boolean(fire.features?.advancedHeat)}, eco=${Boolean(fire.features?.advancedHeat)}, fan only=${Boolean(fire.features?.fanOnly)}, turbo boost=${Boolean(fire.features?.powerBoost)}, RGB logs=${Boolean(fire.features?.rgbLogEffect)}.`);
-        try {
-          await handler.refresh();
-          this.log.info(`Ready: ${fire.friendlyName}`);
-        } catch (error) {
-          this.log.warn(`Could not refresh ${fire.friendlyName}: ${error.message}`);
-        }
+        refreshes.push({ fire, handler });
       }
+
+      const refreshResults = await mapWithConcurrency(
+        refreshes,
+        3,
+        ({ handler }) => handler.refresh(),
+      );
+      refreshResults.forEach((result, index) => {
+        const { fire } = refreshes[index];
+        if (result.status === 'fulfilled') this.log.info(`Ready: ${fire.friendlyName}`);
+        else this.log.warn(`Could not refresh ${fire.friendlyName}: ${result.reason?.message || result.reason}`);
+      });
 
       for (const [uuid, accessory] of this.accessories) {
         if (!discovered.has(uuid)) {
           this.log.info(`Removing stale Flame Connect accessory: ${accessory.displayName}`);
+          this.handlers.get(uuid)?.dispose();
           this.api.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
           this.accessories.delete(uuid);
           this.handlers.delete(uuid);
@@ -106,6 +136,7 @@ export class FlameConnectPlatform {
         this.log.warn('Flame Connect account returned no fireplaces.');
       }
       this.discoveryAttempts = 0;
+      this.authenticationBlocked = false;
       this.clearDiscoveryRetry();
       this.startPolling();
     } catch (error) {
@@ -114,11 +145,13 @@ export class FlameConnectPlatform {
       // retrying them on the backoff schedule burns requests and spams the
       // log every five minutes until someone restarts Homebridge.
       if (error?.code === 'FLAMECONNECT_REAUTH_REQUIRED') {
-        this.log.error('The saved Flame Connect sign-in is no longer valid. Run flameconnect-auth again; your fireplace configuration is unaffected.');
+        this.authenticationBlocked = true;
+        this.log.error('The saved Flame Connect sign-in is no longer valid. Open the plugin settings and sign in again; your fireplace configuration is unaffected.');
         return;
       }
       if (error?.code === 'FLAMECONNECT_NO_TOKEN') {
-        this.log.error('Run flameconnect-auth once, then add the returned refresh token to this plugin configuration.');
+        this.authenticationBlocked = true;
+        this.log.error('Open the Flame Connect plugin settings and complete guided sign-in.');
         return;
       }
       this.scheduleDiscoveryRetry(error);
@@ -141,7 +174,7 @@ export class FlameConnectPlatform {
   scheduleDiscoveryRetry(error) {
     const attempt = this.discoveryAttempts;
     this.discoveryAttempts += 1;
-    const delayMs = this.discoveryRetryDelay(attempt);
+    const delayMs = Math.max(this.discoveryRetryDelay(attempt), Number(error?.retryAfterMs || 0));
     this.log.error(
       `Flame Connect discovery failed (attempt ${attempt + 1}); retrying in ${Math.round(delayMs / 1000)}s: ${error.message}`,
     );
@@ -155,7 +188,8 @@ export class FlameConnectPlatform {
 
   startPolling() {
     if (this.pollTimer) clearInterval(this.pollTimer);
-    const minutes = Math.max(5, Number(this.config.pollIntervalMinutes || 1440));
+    if (this.authenticationBlocked) return;
+    const minutes = Math.min(1440, Math.max(5, Number(this.config.pollIntervalMinutes ?? 15)));
     this.pollTimer = setInterval(() => {
       void this.refreshAll();
     }, minutes * 60_000);
@@ -163,11 +197,25 @@ export class FlameConnectPlatform {
   }
 
   async refreshAll() {
-    const results = await Promise.allSettled([...this.handlers.values()].map((handler) => handler.refresh()));
-    for (const result of results) {
-      if (result.status === 'rejected') {
-        this.log.warn(`Flame Connect background refresh failed: ${result.reason?.message || result.reason}`);
+    if (this.authenticationBlocked) return;
+    if (this.refreshAllPromise) return this.refreshAllPromise;
+    this.refreshAllPromise = (async () => {
+      const results = await mapWithConcurrency([...this.handlers.values()], 3, (handler) => handler.refresh());
+      for (const result of results) {
+        if (result.status !== 'rejected') continue;
+        const error = result.reason;
+        if (error?.code === 'FLAMECONNECT_REAUTH_REQUIRED' || error?.code === 'FLAMECONNECT_NO_TOKEN') {
+          this.authenticationBlocked = true;
+          if (this.pollTimer) clearInterval(this.pollTimer);
+          this.pollTimer = null;
+          this.log.error('Flame Connect background refresh stopped. Open the plugin settings and sign in again.');
+          break;
+        }
+        this.log.warn(`Flame Connect background refresh failed: ${error?.message || error}`);
       }
-    }
+    })().finally(() => {
+      this.refreshAllPromise = null;
+    });
+    return this.refreshAllPromise;
   }
 }

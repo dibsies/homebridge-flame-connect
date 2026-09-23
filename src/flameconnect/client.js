@@ -20,6 +20,15 @@ export { isCloudError } from './errors.js';
 const OVERVIEW_RETRY_DELAY_MS = 500;
 const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
+function retryAfterMilliseconds(response) {
+  const value = response.headers?.get?.('retry-after');
+  if (!value) return undefined;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
+  const date = Date.parse(value);
+  return Number.isFinite(date) ? Math.max(0, date - Date.now()) : undefined;
+}
+
 function parseFeatures(data = {}) {
   return {
     sound: Boolean(data.Sound),
@@ -95,7 +104,16 @@ export class FlameConnectClient {
         await this.auth.getAccessToken(true);
         return this.request(method, route, body, true);
       }
-      throw new FlameConnectCloudError(`Flame Connect API ${method} ${route} failed (HTTP ${response.status}).`);
+      const retryAfterMs = retryAfterMilliseconds(response);
+      if (method === 'GET' && !retried && [429, 503].includes(response.status)
+        && retryAfterMs !== undefined && retryAfterMs <= 5_000) {
+        await delay(retryAfterMs);
+        return this.request(method, route, body, true);
+      }
+      throw new FlameConnectCloudError(
+        `Flame Connect API ${method} ${route} failed (HTTP ${response.status}).`,
+        { retryAfterMs },
+      );
     }
     if (!text) return null;
     try {

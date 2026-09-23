@@ -1,10 +1,11 @@
 export class FlameConnectCloudError extends Error {
-  constructor(message, { cause, kind = 'communication', resultCode } = {}) {
+  constructor(message, { cause, kind = 'communication', resultCode, retryAfterMs } = {}) {
     super(message, cause === undefined ? undefined : { cause });
     this.name = 'FlameConnectCloudError';
     this.code = 'FLAMECONNECT_CLOUD_ERROR';
     this.kind = kind;
     if (resultCode !== undefined) this.resultCode = resultCode;
+    if (retryAfterMs !== undefined) this.retryAfterMs = retryAfterMs;
   }
 }
 

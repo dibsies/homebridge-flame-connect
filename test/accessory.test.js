@@ -258,3 +258,104 @@ test('a cloud failure briefly drains an already queued command burst without mor
   assert.equal(overviewCalls, 1);
   assert.equal(f.handler.queueDepth, 0);
 });
+
+test('fresh queued commands reuse state while stale commands refresh atomically', async () => {
+  const f = fixture({ commandStateMaxAgeSeconds: 10 });
+  let overviewCalls = 0;
+  const overview = f.client.getFireOverview;
+  f.client.getFireOverview = async (...args) => {
+    overviewCalls += 1;
+    return overview(...args);
+  };
+  await Promise.all([
+    f.handler.setFlames(true),
+    f.handler.setHeat(true),
+    f.handler.setLogs(true),
+  ]);
+  assert.equal(overviewCalls, 1);
+  assert.equal(f.remote().heat.heatStatus, 1);
+  assert.equal(f.remote().log.logEffect, 1);
+});
+
+test('zero command freshness forces one refresh for a coalesced color burst', async () => {
+  const f = fixture({ commandStateMaxAgeSeconds: 0 });
+  let overviewCalls = 0;
+  let writes = 0;
+  const overview = f.client.getFireOverview;
+  const write = f.client.writeParameters;
+  f.client.getFireOverview = async (...args) => {
+    overviewCalls += 1;
+    return overview(...args);
+  };
+  f.client.writeParameters = async (...args) => {
+    writes += 1;
+    return write(...args);
+  };
+  await Promise.all([
+    f.handler.setLightColor('mediaColor', 'hue', 240),
+    f.handler.setLightColor('mediaColor', 'saturation', 100),
+    f.handler.setLightColor('mediaColor', 'brightness', 50),
+  ]);
+  assert.equal(overviewCalls, 1);
+  assert.equal(writes, 1);
+});
+
+test('off cancels a staged color write, remembers it, and preserves queue ordering', async () => {
+  const f = fixture();
+  let writes = 0;
+  const write = f.client.writeParameters;
+  f.client.writeParameters = async (...args) => {
+    writes += 1;
+    return write(...args);
+  };
+  const hue = f.handler.setLightColor('mediaColor', 'hue', 210);
+  const saturation = f.handler.setLightColor('mediaColor', 'saturation', 80);
+  const off = f.handler.setFlameFlag('mediaLight', false);
+  await Promise.all([hue, saturation, off]);
+  assert.equal(writes, 1);
+  assert.deepEqual(f.accessory.context.lightColors.mediaColor, {
+    hue: 210, saturation: 80, brightness: 0,
+  });
+});
+
+test('zero brightness reports the remembered picker color', async () => {
+  const f = fixture();
+  await Promise.all([
+    f.handler.setLightColor('mediaColor', 'hue', 300),
+    f.handler.setLightColor('mediaColor', 'saturation', 75),
+    f.handler.setLightColor('mediaColor', 'brightness', 40),
+  ]);
+  await f.handler.setLightColor('mediaColor', 'brightness', 0);
+  const reported = f.handler.reportedHsv('mediaColor', f.handler.state.flame.mediaColor);
+  assert.equal(reported.brightness, 0);
+  assert.equal(reported.hue, 300);
+  assert.ok(Math.abs(reported.saturation - 75) < 1);
+});
+
+test('dispose clears staged color and turbo timers', async () => {
+  const f = fixture();
+  const pending = f.handler.setLightColor('mediaColor', 'hue', 120);
+  f.handler.boostRefreshTimer = setTimeout(() => {}, 60_000);
+  f.handler.dispose();
+  await assert.rejects(pending, /shutting down/);
+  assert.equal(f.handler.boostRefreshTimer, null);
+  assert.equal(f.handler.pendingColors.size, 0);
+});
+
+test('device fault logs occur only on transitions and clear after healthy state', () => {
+  const f = fixture();
+  const messages = [];
+  f.handler.platform.log = {
+    warn: (message) => messages.push(['warn', message]),
+    info: (message) => messages.push(['info', message]),
+    debug: () => {},
+  };
+  f.handler.state.error = { bytes: [1, 0, 0, 0] };
+  f.handler.updateHealthState();
+  f.handler.updateHealthState();
+  f.handler.state.error = { bytes: [0, 0, 0, 0] };
+  f.handler.updateHealthState();
+  assert.equal(messages.filter(([level]) => level === 'warn').length, 1);
+  assert.equal(messages.filter(([level]) => level === 'info').length, 1);
+  assert.ok(messages[0][1].includes('01 00 00 00'));
+});

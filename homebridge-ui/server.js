@@ -1,11 +1,14 @@
 import { randomBytes } from 'node:crypto';
+import path from 'node:path';
 import { HomebridgePluginUiServer, RequestError } from '@homebridge/plugin-ui-utils';
 import {
   buildAuthorizationRequest,
   exchangeAuthorizationCode,
+  FlameConnectAuth,
   parseAuthorizationRedirect,
 } from '../src/flameconnect/auth.js';
 import { loginWithCredentials } from '../src/flameconnect/b2c-login.js';
+import { FlameConnectClient } from '../src/flameconnect/client.js';
 
 const SESSION_LIFETIME_MS = 10 * 60_000;
 
@@ -16,6 +19,7 @@ class FlameConnectUiServer extends HomebridgePluginUiServer {
     this.onRequest('/auth/start', this.startAuthorization.bind(this));
     this.onRequest('/auth/complete', this.completeAuthorization.bind(this));
     this.onRequest('/auth/credentials', this.authenticateCredentials.bind(this));
+    this.onRequest('/auth/validate', this.validateAuthorization.bind(this));
     this.ready();
   }
 
@@ -64,6 +68,25 @@ class FlameConnectUiServer extends HomebridgePluginUiServer {
       return { refreshToken: token.refresh_token };
     } catch (error) {
       throw new RequestError('Flame Connect sign-in failed', { message: error.message });
+    }
+  }
+
+  async validateAuthorization(payload = {}) {
+    const refreshToken = String(payload.refreshToken || '');
+    const configuredTokenFile = String(payload.tokenFile || '').trim();
+    const storagePath = this.homebridgeStoragePath;
+    const tokenFile = configuredTokenFile || (storagePath
+      ? path.join(storagePath, 'flame-connect-tokens.json') : undefined);
+    if (!refreshToken && !tokenFile) return { status: 'not_configured' };
+    const auth = new FlameConnectAuth({ refreshToken, tokenFile });
+    const client = new FlameConnectClient(auth);
+    try {
+      await client.getFires();
+      return { status: 'valid' };
+    } catch (error) {
+      if (error?.code === 'FLAMECONNECT_NO_TOKEN') return { status: 'not_configured' };
+      if (error?.code === 'FLAMECONNECT_REAUTH_REQUIRED') return { status: 'reauth_required' };
+      return { status: 'temporarily_unavailable' };
     }
   }
 

@@ -130,6 +130,32 @@ test('HTTP error responses are marked as cloud errors', async () => {
   }
 });
 
+test('Retry-After is honored for safe reads but never replays writes', async () => {
+  const original = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async (_url, options) => {
+    calls += 1;
+    if (options.method === 'GET' && calls === 1) {
+      return {
+        ok: false, status: 429, headers: { get: () => '0' }, text: async () => 'limited',
+      };
+    }
+    if (options.method === 'GET') return { ok: true, status: 200, text: async () => '[]' };
+    return {
+      ok: false, status: 429, headers: { get: () => '0' }, text: async () => 'limited',
+    };
+  };
+  try {
+    const client = new FlameConnectClient({ getAccessToken: async () => 'token' }, null);
+    await client.getFires();
+    assert.equal(calls, 2);
+    await assert.rejects(client.writeParameters('id', []), (error) => error.retryAfterMs === 0);
+    assert.equal(calls, 3);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
 test('overview result code 1 retries once, hides the device id, and becomes a cloud error', async () => {
   const original = globalThis.fetch;
   let calls = 0;

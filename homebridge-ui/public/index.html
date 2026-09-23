@@ -59,16 +59,43 @@
       homebridge.toast.success('Select Save to apply the new sign-in.', 'Flame Connect connected');
     };
 
-    const updateStatus = () => {
-      status.textContent = pluginConfig[0]?.refreshToken
-        ? 'A Flame Connect sign-in is configured. Start again only to replace or repair it.'
-        : 'No Flame Connect sign-in is currently saved in this configuration.';
+    let validationSequence = 0;
+    let validationTimer;
+    const updateStatus = async () => {
+      const sequence = ++validationSequence;
+      if (!pluginConfig[0]?.refreshToken && !pluginConfig[0]?.tokenFile) {
+        status.textContent = 'No Flame Connect sign-in is currently saved.';
+        return;
+      }
+      status.textContent = 'Checking the saved Flame Connect sign-in…';
+      try {
+        const result = await homebridge.request('/auth/validate', {
+          refreshToken: pluginConfig[0]?.refreshToken || '',
+          tokenFile: pluginConfig[0]?.tokenFile || '',
+        });
+        if (sequence !== validationSequence) return;
+        const messages = {
+          valid: 'Flame Connect is signed in and the saved token is valid. You only need to sign in again if the plugin prompts you to renew authentication.',
+          reauth_required: 'The saved sign-in has expired or was revoked. Sign in again below.',
+          temporarily_unavailable: 'The saved sign-in could not be checked because Flame Connect is temporarily unavailable. This does not necessarily mean the token is invalid.',
+          not_configured: 'No Flame Connect sign-in is currently saved.',
+        };
+        status.textContent = messages[result.status] || messages.temporarily_unavailable;
+      } catch {
+        if (sequence === validationSequence) {
+          status.textContent = 'The saved sign-in could not be checked. This does not necessarily mean the token is invalid.';
+        }
+      }
     };
-    updateStatus();
+    void updateStatus();
+    const scheduleStatus = () => {
+      clearTimeout(validationTimer);
+      validationTimer = setTimeout(() => void updateStatus(), 500);
+    };
     homebridge.showSchemaForm();
     window.homebridge.addEventListener('configChanged', (event) => {
       pluginConfig = event.data;
-      updateStatus();
+      scheduleStatus();
     });
 
     redirect.addEventListener('input', () => {

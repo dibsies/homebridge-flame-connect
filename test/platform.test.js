@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { FlameConnectPlatform } from '../src/platform.js';
+import { FlameConnectPlatform, mapWithConcurrency } from '../src/platform.js';
 
 test('cached accessories wait for current capabilities before services are constructed', () => {
   const callbacks = {};
@@ -91,7 +91,7 @@ test('revoked sign-in does not schedule discovery retries', async () => {
     assert.equal(platform.discoveryAttempts, 0);
     assert.equal(platform.discoveryTimer, null);
     assert.equal(platform.pollTimer, null);
-    assert.ok(messages.some(([level, m]) => level === 'error' && /flameconnect-auth again/.test(m)));
+    assert.ok(messages.some(([level, m]) => level === 'error' && /sign in again/.test(m)));
   } finally {
     platform.clearDiscoveryRetry();
   }
@@ -108,8 +108,45 @@ test('missing refresh token does not schedule discovery retries', async () => {
     await platform.discoverDevices();
     assert.equal(platform.discoveryAttempts, 0);
     assert.equal(platform.discoveryTimer, null);
-    assert.ok(messages.some(([level, m]) => level === 'error' && /flameconnect-auth once/.test(m)));
+    assert.ok(messages.some(([level, m]) => level === 'error' && /guided sign-in/.test(m)));
   } finally {
     platform.clearDiscoveryRetry();
+  }
+});
+
+test('bounded concurrency never exceeds its limit', async () => {
+  let active = 0;
+  let maximum = 0;
+  const results = await mapWithConcurrency([1, 2, 3, 4, 5, 6], 3, async (value) => {
+    active += 1;
+    maximum = Math.max(maximum, active);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    active -= 1;
+    return value * 2;
+  });
+  assert.equal(maximum, 3);
+  assert.deepEqual(results.map((result) => result.value), [2, 4, 6, 8, 10, 12]);
+});
+
+test('background polling defaults to fifteen minutes and does not overlap', async () => {
+  const { platform } = mockPlatform();
+  platform.startPolling();
+  try {
+    assert.equal(platform.pollTimer._idleTimeout, 15 * 60_000);
+    let release;
+    let calls = 0;
+    platform.handlers.set('one', {
+      refresh: () => {
+        calls += 1;
+        return new Promise((resolve) => { release = resolve; });
+      },
+    });
+    const first = platform.refreshAll();
+    const second = platform.refreshAll();
+    assert.equal(calls, 1);
+    release();
+    await Promise.all([first, second]);
+  } finally {
+    clearInterval(platform.pollTimer);
   }
 });

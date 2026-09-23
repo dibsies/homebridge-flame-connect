@@ -30,4 +30,9 @@ test('custom UI server starts over Homebridge IPC and creates an OAuth session',
   const url = new URL(message.payload.data.authorizationUrl);
   assert.equal(url.searchParams.get('response_type'), 'code');
   assert.ok(url.searchParams.get('state'));
+  child.send({ action: 'request', requestId: 'validate', path: '/auth/validate', body: {} });
+  const validation = await waitForMessage(child,
+    (candidate) => candidate?.action === 'response' && candidate.payload?.requestId === 'validate');
+  assert.equal(validation.payload.success, true);
+  assert.equal(validation.payload.data.status, 'not_configured');
 });

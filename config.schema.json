@@ -30,8 +30,8 @@
         "type": "integer",
         "minimum": 5,
         "maximum": 1440,
-        "default": 1440,
-        "description": "How often to refresh fireplace state in the background. Default is 24 hours to stay conservative with the cloud API. HomeKit reads also refresh stale state on demand."
+        "default": 15,
+        "description": "How often to synchronize changes made in the Flame Connect app. Shorter intervals use more cloud requests; the minimum is 5 minutes."
       },
       "cacheSeconds": {
         "title": "HomeKit Read Cache",
@@ -40,6 +40,14 @@
         "maximum": 600,
         "default": 30,
         "description": "Minimum seconds between on-demand cloud reads for one fireplace."
+      },
+      "commandStateMaxAgeSeconds": {
+        "title": "Command State Freshness",
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 60,
+        "default": 10,
+        "description": "Commands reuse recently confirmed fireplace state for faster response. Set to 0 to refresh before every command."
       },
       "exposePower": {
         "title": "Expose Fireplace Power",
@@ -191,6 +199,7 @@
     "refreshToken",
     "pollIntervalMinutes",
     "cacheSeconds",
+    "commandStateMaxAgeSeconds",
     "exposePower",
     "exposeFlames",
     "exposeHeater",

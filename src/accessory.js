@@ -64,41 +64,25 @@ export class FlameConnectAccessory {
     this.queueDepth = 0;
     this.cloudFailureUntil = 0;
     this.lastCloudError = null;
+    this.healthState = null;
+    this.disposed = false;
+    this.pendingColors = new Map();
     // Serialize the entire read/modify/write operation, not just the POST.
     for (const method of ['setPower', 'setFlames', 'setFlameBrightness', 'setFlameSpeed', 'setFlameFlag',
       'setHeat', 'setHeatTemperature', 'setEcoMode', 'setFanOnly', 'setTurboBoost',
-      'setLogs', 'setLightColor', 'setLogColor']) {
+      'setLogs']) {
       const operation = this[method].bind(this);
       this[method] = (...args) => {
-        const queuedAt = Date.now();
-        this.queueDepth += 1;
-        if (this.queueDepth > 1) {
-          this.platform.log?.debug?.(`Flame Connect command queued (${this.queueDepth} pending).`);
+        let cancelledColor;
+        if (method === 'setFlameFlag' && args[1] === false) {
+          const colorKey = args[0] === 'mediaLight' ? 'mediaColor'
+            : args[0] === 'overheadLight' ? 'overheadColor' : undefined;
+          if (colorKey) cancelledColor = this.cancelPendingColor(colorKey);
+        } else if (method === 'setLogs' && args[0] === false) {
+          cancelledColor = this.cancelPendingColor('logColor');
         }
-        const pending = this.commandQueue
-          .then(() => {
-            const waitedMs = Date.now() - queuedAt;
-            if (waitedMs > 250) {
-              this.platform.log?.debug?.(`Flame Connect command waited ${waitedMs}ms in the queue.`);
-            }
-            if (Date.now() < this.cloudFailureUntil && this.lastCloudError) {
-              throw this.lastCloudError;
-            }
-            return operation(...args);
-          })
-          .catch((error) => {
-            if (isCloudError(error)) {
-              // A brief cooldown prevents an already queued HomeKit gesture
-              // burst from hammering a cloud service that just timed out.
-              this.cloudFailureUntil = Date.now() + 2_000;
-              this.lastCloudError = error;
-            }
-            throw this.toHapError(error);
-          })
-          .finally(() => {
-            this.queueDepth = Math.max(0, this.queueDepth - 1);
-          });
-        this.commandQueue = pending.catch(() => {});
+        const pending = this.enqueueCommand(() => operation(...args));
+        if (cancelledColor) this.settleColorWaiters(cancelledColor.waiters, pending);
         return pending;
       };
     }
@@ -252,7 +236,7 @@ export class FlameConnectAccessory {
       for (const [characteristic, field] of [[Characteristic.Hue, 'hue'],
         [Characteristic.Saturation, 'saturation'], [Characteristic.Brightness, 'brightness']]) {
         this.logService.getCharacteristic(characteristic)
-          .onGet(async () => { await this.ensureFresh(); return rgbwToHsv(this.state.log?.color)[field]; })
+          .onGet(async () => { await this.ensureFresh(); return this.reportedHsv('logColor', this.state.log?.color)[field]; })
           .onSet((value) => this.setLogColor(field, Number(value)));
       }
     } else {
@@ -281,10 +265,41 @@ export class FlameConnectAccessory {
       if (!service) continue;
       for (const [characteristic, field] of [[Characteristic.Hue,'hue'], [Characteristic.Saturation,'saturation'], [Characteristic.Brightness,'brightness']]) {
         service.getCharacteristic(characteristic)
-          .onGet(async () => { await this.ensureFresh(); return rgbwToHsv(this.state.flame?.[key])[field]; })
+          .onGet(async () => { await this.ensureFresh(); return this.reportedHsv(key, this.state.flame?.[key])[field]; })
           .onSet(value => this.setLightColor(key, field, Number(value)));
       }
     }
+  }
+
+  enqueueCommand(operation) {
+    if (this.disposed) return Promise.reject(new Error('Flame Connect accessory is shutting down.'));
+    const queuedAt = Date.now();
+    this.queueDepth += 1;
+    if (this.queueDepth > 1) {
+      this.platform.log?.debug?.(`Flame Connect command queued (${this.queueDepth} pending).`);
+    }
+    const pending = this.commandQueue
+      .then(() => {
+        const waitedMs = Date.now() - queuedAt;
+        if (waitedMs > 250) {
+          this.platform.log?.debug?.(`Flame Connect command waited ${waitedMs}ms in the queue.`);
+        }
+        if (this.disposed) throw new Error('Flame Connect accessory is shutting down.');
+        if (Date.now() < this.cloudFailureUntil && this.lastCloudError) throw this.lastCloudError;
+        return operation();
+      })
+      .catch((error) => {
+        if (isCloudError(error)) {
+          this.cloudFailureUntil = Date.now() + 2_000;
+          this.lastCloudError = error;
+        }
+        throw this.toHapError(error);
+      })
+      .finally(() => {
+        this.queueDepth = Math.max(0, this.queueDepth - 1);
+      });
+    this.commandQueue = pending.catch(() => {});
+    return pending;
   }
 
   getService(ServiceType, name, subtype) {
@@ -333,6 +348,103 @@ export class FlameConnectAccessory {
     return this.refresh();
   }
 
+  async ensureCommandFresh() {
+    const configured = Number(this.platform.config.commandStateMaxAgeSeconds ?? 10);
+    const maximumAgeMs = Math.min(60, Math.max(0, Number.isFinite(configured) ? configured : 10)) * 1000;
+    const ageMs = this.lastRefresh ? Date.now() - this.lastRefresh : Number.POSITIVE_INFINITY;
+    if (maximumAgeMs > 0 && ageMs < maximumAgeMs) {
+      this.platform.log?.debug?.(`Using ${Math.max(0, Math.round(ageMs))}ms-old state for Flame Connect command.`);
+      return this.state;
+    }
+    this.platform.log?.debug?.('Refreshing state before Flame Connect command.');
+    return this.refresh();
+  }
+
+  reportedHsv(key, color) {
+    const actual = rgbwToHsv(color);
+    const remembered = this.accessory.context.lightColors?.[key];
+    if (actual.brightness === 0 && remembered) {
+      return { ...actual, hue: remembered.hue, saturation: remembered.saturation };
+    }
+    return actual;
+  }
+
+  stageColor(key, field, value) {
+    if (this.disposed) return Promise.reject(new Error('Flame Connect accessory is shutting down.'));
+    let pending = this.pendingColors.get(key);
+    if (!pending) {
+      pending = { changes: {}, waiters: [], timer: null };
+      this.pendingColors.set(key, pending);
+    }
+    pending.changes[field] = value;
+    const result = new Promise((resolve, reject) => pending.waiters.push({ resolve, reject }));
+    if (pending.timer) clearTimeout(pending.timer);
+    pending.timer = setTimeout(() => this.flushPendingColor(key), 200);
+    pending.timer.unref?.();
+    return result;
+  }
+
+  flushPendingColor(key) {
+    const pending = this.pendingColors.get(key);
+    if (!pending) return;
+    this.pendingColors.delete(key);
+    if (pending.timer) clearTimeout(pending.timer);
+    const operation = this.enqueueCommand(() => this.commitColor(key, pending.changes));
+    this.settleColorWaiters(pending.waiters, operation);
+  }
+
+  cancelPendingColor(key) {
+    const pending = this.pendingColors.get(key);
+    if (!pending) return null;
+    this.pendingColors.delete(key);
+    if (pending.timer) clearTimeout(pending.timer);
+    const remembered = (this.accessory.context.lightColors ||= {});
+    const color = key === 'logColor' ? this.state.log?.color : this.state.flame?.[key];
+    remembered[key] = { ...this.reportedHsv(key, color), ...pending.changes };
+    return pending;
+  }
+
+  settleColorWaiters(waiters, operation) {
+    operation.then(
+      (value) => waiters.forEach(({ resolve }) => resolve(value)),
+      (error) => waiters.forEach(({ reject }) => reject(error)),
+    );
+  }
+
+  async commitColor(key, changes) {
+    await this.ensureCommandFresh();
+    const remembered = (this.accessory.context.lightColors ||= {});
+    const color = key === 'logColor' ? this.state.log?.color : this.state.flame?.[key];
+    const current = this.reportedHsv(key, color);
+    const next = { ...(current.brightness === 0 ? remembered[key] || current : current), ...changes };
+    if (key === 'logColor') {
+      this.state.log = await this.platform.client.setLogColor(
+        this.fire.fireId, this.state.log, hsvToRgbw(next),
+      );
+    } else {
+      this.state.flame = await this.platform.client.setFlame(
+        this.fire.fireId, this.state.flame, { [key]: hsvToRgbw(next), mediaTheme: 0 },
+      );
+    }
+    remembered[key] = next;
+    this.lastRefresh = Date.now();
+    this.pushStateToHomeKit();
+  }
+
+  dispose() {
+    if (this.disposed) return;
+    this.disposed = true;
+    if (this.boostRefreshTimer) {
+      clearTimeout(this.boostRefreshTimer);
+      this.boostRefreshTimer = null;
+    }
+    const error = new Error('Flame Connect accessory is shutting down.');
+    for (const key of [...this.pendingColors.keys()]) {
+      const pending = this.cancelPendingColor(key);
+      pending?.waiters.forEach(({ reject }) => reject(error));
+    }
+  }
+
   // Cloud and network failures become HomeKit communication errors so the
   // Home app shows "No Response" instead of silently keeping stale state.
   // Local validation errors pass through unchanged.
@@ -346,7 +458,9 @@ export class FlameConnectAccessory {
       const status = error.kind === 'timeout'
         ? (hap.HAPStatus.OPERATION_TIMED_OUT ?? hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE)
         : hap.HAPStatus.SERVICE_COMMUNICATION_FAILURE;
-      return new hap.HapStatusError(status);
+      const hapError = new hap.HapStatusError(status);
+      if (error.code === 'FLAMECONNECT_REAUTH_REQUIRED') hapError.code = error.code;
+      return hapError;
     }
     return error;
   }
@@ -359,6 +473,7 @@ export class FlameConnectAccessory {
         this.state = overview.parameters;
         this.lastRefresh = Date.now();
         if (overview.fire) this.updateFire(overview.fire);
+        this.updateHealthState();
         this.pushStateToHomeKit();
         return this.state;
       } catch (error) {
@@ -370,11 +485,30 @@ export class FlameConnectAccessory {
     return this.refreshPromise;
   }
 
+  updateHealthState() {
+    const bytes = Array.isArray(this.state.error?.bytes) ? this.state.error.bytes : [];
+    const faultBytes = bytes.map((value) => Number(value) & 0xff);
+    const hasFault = faultBytes.some((value) => value !== 0);
+    const connectionState = Number(this.fire.connectionState ?? 0);
+    const next = JSON.stringify({ faultBytes, connectionState });
+    if (next === this.healthState) return;
+    const previous = this.healthState;
+    this.healthState = next;
+    if (hasFault) {
+      const code = faultBytes.map((value) => value.toString(16).padStart(2, '0')).join(' ');
+      this.platform.log?.warn?.(`The fireplace reported a device fault (code ${code}).`);
+    } else if (previous) {
+      const previousFault = JSON.parse(previous).faultBytes?.some((value) => value !== 0);
+      if (previousFault) this.platform.log?.info?.('The fireplace no longer reports a device fault.');
+    }
+    this.platform.log?.debug?.(`Flame Connect device connection state changed to ${connectionState}.`);
+  }
+
   pushStateToHomeKit() {
     const C = this.platform.Characteristic;
     for (const [service,key] of [[this.mediaService,'mediaColor'],[this.overheadService,'overheadColor']]) {
       if (!service || !this.state.flame?.[key]) continue;
-      const hsv=rgbwToHsv(this.state.flame[key]);
+      const hsv=this.reportedHsv(key, this.state.flame[key]);
       service.updateCharacteristic(C.Hue,hsv.hue);
       service.updateCharacteristic(C.Saturation,hsv.saturation);
       service.updateCharacteristic(C.Brightness,hsv.brightness);
@@ -408,7 +542,7 @@ export class FlameConnectAccessory {
     }
     if (this.state.log && this.logService) {
       this.logService.updateCharacteristic(C.On, this.state.log.logEffect === OnOff.ON);
-      const hsv = rgbwToHsv(this.state.log.color);
+      const hsv = this.reportedHsv('logColor', this.state.log.color);
       this.logService.updateCharacteristic(C.Hue, hsv.hue);
       this.logService.updateCharacteristic(C.Saturation, hsv.saturation);
       this.logService.updateCharacteristic(C.Brightness, hsv.brightness);
@@ -421,7 +555,7 @@ export class FlameConnectAccessory {
   }
 
   async setPower(on) {
-    await this.ensureFresh(true);
+    await this.ensureCommandFresh();
     await this.platform.client.setPower(this.fire.fireId, this.state, on);
     if (this.state.mode) this.state.mode = { ...this.state.mode, mode: on ? FireMode.MANUAL : FireMode.STANDBY };
     if (on && this.state.flame) this.state.flame = { ...this.state.flame, flameEffect: OnOff.ON };
@@ -435,7 +569,7 @@ export class FlameConnectAccessory {
   }
 
   async setFlames(on) {
-    await this.ensureFresh(true);
+    await this.ensureCommandFresh();
     this.state.flame = await this.platform.client.setFlame(
       this.fire.fireId,
       this.state.flame,
@@ -451,7 +585,7 @@ export class FlameConnectAccessory {
   }
 
   async setFlameBrightness(value) {
-    await this.ensureFresh(true);
+    await this.ensureCommandFresh();
     const brightness = value <= 50 ? Brightness.LOW : Brightness.HIGH;
     this.state.flame = await this.platform.client.setFlame(this.fire.fireId, this.state.flame, { brightness });
     this.lastRefresh = Date.now();
@@ -472,7 +606,7 @@ export class FlameConnectAccessory {
 
   async setFlameSpeed(percent) {
     if (!Number.isFinite(percent)) throw new Error('Invalid flame speed.');
-    await this.ensureFresh(true);
+    await this.ensureCommandFresh();
     const speed = Math.min(5, Math.max(1, Math.round(percent / 20)));
     this.state.flame = await this.platform.client.setFlameSpeed(this.fire.fireId, this.state.flame, speed);
     this.lastRefresh = Date.now();
@@ -485,7 +619,7 @@ export class FlameConnectAccessory {
   }
 
   async setFlameFlag(key, on) {
-    await this.ensureFresh(true);
+    await this.ensureCommandFresh();
     this.state.flame = await this.platform.client.setFlame(
       this.fire.fireId,
       this.state.flame,
@@ -495,20 +629,10 @@ export class FlameConnectAccessory {
     this.pushStateToHomeKit();
   }
 
-  async setLightColor(key, field, value) {
+  setLightColor(key, field, value) {
     if (!['mediaColor','overheadColor'].includes(key) || !['hue','saturation','brightness'].includes(field)
       || !Number.isFinite(value)) throw new Error('Invalid lighting color setting.');
-    await this.ensureFresh();
-    const hsv = rgbwToHsv(this.state.flame?.[key]);
-    // Retain selected hue/saturation while brightness is zero.
-    const remembered = (this.accessory.context.lightColors ||= {});
-    if (hsv.saturation === 0 && remembered[key]) hsv.hue = remembered[key].hue;
-    const next = { ...(hsv.brightness === 0 ? remembered[key] || hsv : hsv), [field]:value };
-    const changes = { [key]:hsvToRgbw(next), mediaTheme:0 };
-    this.state.flame = await this.platform.client.setFlame(this.fire.fireId,this.state.flame,changes);
-    remembered[key] = next;
-    this.lastRefresh = Date.now();
-    this.pushStateToHomeKit();
+    return this.stageColor(key, field, value);
   }
 
   async getHeat() {
@@ -534,7 +658,7 @@ export class FlameConnectAccessory {
   }
 
   async setHeat(on) {
-    await this.ensureFresh(true);
+    await this.ensureCommandFresh();
     this.state.heat = await this.platform.client.setHeat(this.fire.fireId, this.state.heat, on);
     this.lastRefresh = Date.now();
     this.pushStateToHomeKit();
@@ -542,7 +666,7 @@ export class FlameConnectAccessory {
 
   async setHeatTemperature(value) {
     if (!Number.isFinite(value)) throw new Error('Invalid heater target temperature.');
-    await this.ensureFresh(true);
+    await this.ensureCommandFresh();
     this.state.heat = await this.platform.client.setHeatTemperature(this.fire.fireId, this.state.heat, value);
     this.lastRefresh = Date.now();
     this.pushStateToHomeKit();
@@ -565,7 +689,7 @@ export class FlameConnectAccessory {
   }
 
   async setHeatMode(changes) {
-    await this.ensureFresh(true);
+    await this.ensureCommandFresh();
     this.state.heat = await this.platform.client.setHeatMode(this.fire.fireId, this.state.heat, changes);
     this.lastRefresh = Date.now();
     this.pushStateToHomeKit();
@@ -577,7 +701,7 @@ export class FlameConnectAccessory {
 
   async setFanOnly(on) {
     if (on) {
-      await this.ensureFresh(true);
+      await this.ensureCommandFresh();
       this.rememberPersistentHeatState();
       return this.setHeatMode({ heatMode: HeatMode.FAN_ONLY, heatStatus: OnOff.ON });
     }
@@ -592,7 +716,7 @@ export class FlameConnectAccessory {
 
   async setTurboBoost(on) {
     if (on) {
-      await this.ensureFresh(true);
+      await this.ensureCommandFresh();
       this.rememberPersistentHeatState();
       const duration = Math.min(20, Math.max(1, Number(this.platform.config.turboBoostMinutes || 20)));
       await this.setHeatMode({
@@ -624,26 +748,16 @@ export class FlameConnectAccessory {
   }
 
   async setLogs(on) {
-    await this.ensureFresh(true);
+    await this.ensureCommandFresh();
     this.state.log = await this.platform.client.setLog(this.fire.fireId, this.state.log, on);
     this.lastRefresh = Date.now();
     this.pushStateToHomeKit();
   }
 
-  async setLogColor(field, value) {
+  setLogColor(field, value) {
     if (!['hue', 'saturation', 'brightness'].includes(field) || !Number.isFinite(value)) {
       throw new Error('Invalid log color setting.');
     }
-    await this.ensureFresh();
-    const hsv = rgbwToHsv(this.state.log?.color);
-    const remembered = (this.accessory.context.lightColors ||= {});
-    if (hsv.saturation === 0 && remembered.logColor) hsv.hue = remembered.logColor.hue;
-    const next = { ...(hsv.brightness === 0 ? remembered.logColor || hsv : hsv), [field]: value };
-    this.state.log = await this.platform.client.setLogColor(
-      this.fire.fireId, this.state.log, hsvToRgbw(next),
-    );
-    remembered.logColor = next;
-    this.lastRefresh = Date.now();
-    this.pushStateToHomeKit();
+    return this.stageColor('logColor', field, value);
   }
 }

@@ -2,7 +2,7 @@
 
 Unofficial Homebridge plugin for Dimplex, Faber, and Real Flame electric fireplaces that use the Flame Connect app/cloud service.
 
-This is an early community prototype. It was built from the publicly documented/reverse-engineered Flame Connect protocol work in `deviantintegral/flameconnect` and `deviantintegral/flame_connect_ha`. It does not require Home Assistant or Python at runtime.
+It was built from the publicly documented/reverse-engineered Flame Connect protocol work in `deviantintegral/flameconnect` and `deviantintegral/flame_connect_ha`. It does not require Home Assistant or Python at runtime.
 
 ## Current controls
 
@@ -40,7 +40,7 @@ The plugin does not need to save your Flame Connect email/password. It uses Flam
 
 Open **Plugins → Homebridge Flame Connect → Settings** and use the **Flame Connect Sign-in** card. Enter the email and password used by the official Flame Connect app, then select **Sign in and connect**. The credentials are forwarded over HTTPS to Flame Connect's Microsoft Azure B2C tenant for this one request and immediately discarded. They are never written to the Homebridge configuration, token file, or logs. Only the resulting OAuth refresh token is placed into the plugin configuration; select **Save** and restart Homebridge.
 
-This guided workflow runs in Homebridge UI and therefore works whether you open it from macOS, Windows, or Linux. A browser-based authorization-code flow remains available under **Browser sign-in fallback**, as do the native macOS and terminal helpers below.
+This guided workflow runs in Homebridge UI and therefore works whether you open it from macOS, Windows, or Linux. The settings page validates the saved sign-in against the Flame Connect API and distinguishes an expired sign-in from temporary service unavailability. A browser-based authorization-code flow remains available under **Browser sign-in fallback**, as do the native macOS and terminal helpers below.
 
 ### Native macOS alternative
 
@@ -99,6 +99,8 @@ Each control has an editable name in plugin settings, including the optional adv
 
 Commands for each fireplace run in order so simultaneous Home commands do not write over one another. Cloud result-code rejections are reported as errors. Successful cloud requests do not by themselves prove a physical lighting change; Logs still needs device validation.
 
+Hue, saturation, and brightness gestures are combined into one trailing-edge cloud write per light. Turning a light off while its color is still pending preserves the selected color without sending an obsolete color command. Apple Home continues to display the remembered hue and saturation while brightness is zero.
+
 In Homebridge UI, add the Flame Connect platform and paste the refresh token into **Flame Connect Refresh Token**.
 
 Equivalent JSON:
@@ -108,8 +110,9 @@ Equivalent JSON:
   "platform": "FlameConnect",
   "name": "Flame Connect",
   "refreshToken": "PASTE_REFRESH_TOKEN_HERE",
-  "pollIntervalMinutes": 1440,
+  "pollIntervalMinutes": 15,
   "cacheSeconds": 30,
+  "commandStateMaxAgeSeconds": 10,
   "advancedControls": false
 }
 ```
@@ -118,9 +121,11 @@ After the first successful token refresh, rotated OAuth tokens are persisted to 
 
 ## Cloud polling behavior
 
-Flame Connect is a cloud API. The upstream reverse-engineering project intentionally avoids aggressive polling. This plugin defaults to one background refresh every 24 hours. When HomeKit requests state, stale data is refreshed on demand with a short cache to coalesce multiple characteristic reads.
+Flame Connect is a cloud API. This plugin defaults to one background refresh every 15 minutes. When HomeKit requests state, stale data is refreshed on demand with a short cache to coalesce multiple characteristic reads. Set a longer interval to reduce cloud traffic; the minimum is five minutes.
 
-Writes refresh the fireplace state immediately before changing a multi-field parameter, because Flame Connect encodes several visual settings together in one binary parameter and changing one field must preserve the others.
+Flame Connect encodes several settings together in multi-field binary parameters, so writes must start from trustworthy state. Commands reuse state confirmed within the last 10 seconds by default; stale state is refreshed inside the per-fireplace command queue before the write is constructed. This normally halves command latency while preserving atomic ordering. Set **Command State Freshness** to `0` for the conservative behavior of refreshing before every command.
+
+Background refreshes do not overlap, startup refreshes use bounded concurrency for multi-fireplace accounts, and polling stops when authentication is known to require user action. Fireplace-reported fault bytes are logged on state transitions without exposing device identifiers.
 
 ## Installation from a local package on Homebridge Raspberry Pi image
 
@@ -128,8 +133,8 @@ For a release-candidate test package, download the generated `.tgz` on the Homeb
 
 ```bash
 cd /tmp
-wget https://github.com/dibsies/homebridge-flame-connect/releases/download/v0.1.7/homebridge-flame-connect-0.1.7.tgz
-/opt/homebridge/bin/npm install --prefix /var/lib/homebridge /tmp/homebridge-flame-connect-0.1.7.tgz
+wget https://github.com/dibsies/homebridge-flame-connect/releases/download/v1.0.0-rc.1/homebridge-flame-connect-1.0.0-rc.1.tgz
+/opt/homebridge/bin/npm install --prefix /var/lib/homebridge /tmp/homebridge-flame-connect-1.0.0-rc.1.tgz
 ```
 
 Do not use `npm install -g` for this Homebridge image: that puts the plugin under `/opt/homebridge/lib/node_modules`, while the service and its locally installed plugins live under `/var/lib/homebridge/node_modules`. Restart Homebridge after installation.
@@ -140,7 +145,7 @@ The package name starts with `homebridge-`, its keywords include `homebridge-plu
 
 ## Limitations
 
-- Main power/flame operation, thermostat, Flame Speed, RGBW Logs, and Media Bed/Media Accent color and dimming have been user-confirmed on one fireplace. v0.1.7's heater modes and other fireplace models still need physical verification.
+- Main power/flame operation, thermostat, heater modes, Flame Speed, RGBW Logs, and Media Bed/Media Accent color and dimming have been user-confirmed on one fireplace. Other fireplace models still need physical verification.
 - Media Bed, Media Accent, and Logs are implemented writes (Flame Effect parameter 322 and Log Effect parameter 370). Unsupported features or rejected commands may prevent a physical effect.
 - Flame color presets, timer, sound, Schedule heat mode, and media-theme selection are not exposed as HomeKit controls.
 - Flame Connect is an unofficial, unversioned cloud API and Dimplex/Glen Dimplex can change it at any time.

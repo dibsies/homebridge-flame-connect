@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.0.0-rc.1
+
+- Reuse recently confirmed fireplace state inside the serialized command queue, reducing most commands from two cloud round trips to one while retaining a configurable conservative mode.
+- Coalesce HomeKit hue, saturation, and brightness gestures into one trailing-edge write per light without coalescing power, heater, mode, or on/off commands.
+- Preserve the selected Media Bed, Media Accent, and Logs color in Apple Home while brightness is zero and restore it when the light returns.
+- Cancel a color write that is still staged when the same light is turned off, preserving the final selected color for the next turn-on.
+- Refresh multiple fireplaces with bounded concurrency, prevent overlapping poll cycles, and change the new-installation background synchronization default to 15 minutes.
+- Stop background polling when authentication requires user action and replace terminal-helper-only messages with guided Homebridge settings instructions.
+- Honor usable `Retry-After` guidance for safe reads without replaying writes whose outcome could be uncertain.
+- Validate saved authentication through the Flame Connect API and distinguish revoked authentication from temporary cloud unavailability.
+- Clear accessory timers and staged color operations on shutdown or accessory removal.
+- Log fireplace-reported fault transitions without exposing device identifiers; avoid unsupported HomeKit fault-characteristic placement.
+- Expand automated coverage for atomic freshness checks, conservative mode, coalescing, color/off ordering, zero-brightness color retention, bounded concurrency, polling, lifecycle cleanup, and fault transitions.
+
 ## 0.1.9
 
 - Replace ad-hoc cloud error flags with a consistent typed Flame Connect cloud error that safely wraps native Node errors.

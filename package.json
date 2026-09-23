@@ -2,7 +2,7 @@
   "name": "homebridge-flame-connect",
   "displayName": "Homebridge Flame Connect",
   "type": "module",
-  "version": "0.1.9",
+  "version": "1.0.0-rc.1",
   "description": "Unofficial Homebridge plugin for Dimplex/Faber/Real Flame fireplaces using the Flame Connect cloud API.",
   "author": {
     "name": "dibsies",
