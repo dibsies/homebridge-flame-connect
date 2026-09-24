@@ -48,6 +48,7 @@ export class FlameConnectPlatform {
       log,
     });
     this.client = new FlameConnectClient(this.auth, log);
+    this.sanitizeConfig();
 
     api.on('didFinishLaunching', () => {
       void this.discoverDevices();
@@ -60,11 +61,48 @@ export class FlameConnectPlatform {
     });
   }
 
+  // Runtime config validation: the UI schema cannot be trusted to constrain
+  // values (hand-edited config, older cached values). Sanitize independently
+  // so invalid values can neither crash nor trigger rapid polling.
+  sanitizeConfig() {
+    const config = this.config;
+    if (typeof config.name === 'string') {
+      const name = config.name.trim().slice(0, 64);
+      if (name) config.name = name; else delete config.name;
+    }
+    const numeric = (key, { min, max, fallback }) => {
+      const value = Number(config[key]);
+      config[key] = Number.isFinite(value) ? Math.min(max, Math.max(min, value)) : fallback;
+    };
+    numeric('pollIntervalMinutes', { min: 5, max: 1440, fallback: 15 });
+    numeric('cacheSeconds', { min: 5, max: 3600, fallback: 30 });
+    numeric('commandStateMaxAgeSeconds', { min: 0, max: 300, fallback: 10 });
+    numeric('turboBoostMinutes', { min: 1, max: 20, fallback: 20 });
+    if (typeof config.tokenFile === 'string' && !config.tokenFile.trim()) {
+      delete config.tokenFile;
+    }
+  }
+
+  // True when the user has explicitly disabled every control. Such a
+  // fireplace gets no accessory at all rather than a confusing
+  // information-only tile with nothing to operate.
+  allControlsDisabled() {
+    const keys = ['exposePower', 'exposeFlames', 'exposeHeater', 'exposeEcoMode',
+      'exposeFanOnly', 'exposeTurboBoost', 'exposeFlameSpeed', 'exposeMediaLight',
+      'exposeOverheadLight', 'exposeLogs'];
+    return keys.every((key) => this.config[key] === false) && !this.config.advancedControls;
+  }
+
   configureAccessory(accessory) {
     this.accessories.set(accessory.UUID, accessory);
-    // Do not construct services from cached capabilities. New plugin versions
-    // may learn additional feature flags (PowerBoost in v0.1.7), and a cached
-    // handler would omit those services before current discovery data arrives.
+    // Configure handlers immediately from cached context so existing controls
+    // keep working through a startup outage. syncServices() reconciles with
+    // current capabilities once discovery and the first refresh complete, so
+    // a cached handler can never permanently omit newly learned services.
+    if (accessory.context?.fire && !this.handlers.has(accessory.UUID)) {
+      const handler = new FlameConnectAccessory(this, accessory, accessory.context.fire);
+      this.handlers.set(accessory.UUID, handler);
+    }
   }
 
   attach(accessory, fire) {
@@ -89,16 +127,26 @@ export class FlameConnectPlatform {
 
       for (const fire of fires) {
         const uuid = this.api.hap.uuid.generate(`flameconnect:${fire.fireId}`);
+        if (this.allControlsDisabled()) {
+          this.log.info(`All controls disabled for ${fire.friendlyName}; skipping HomeKit registration.`);
+          continue;
+        }
         discovered.add(uuid);
         let accessory = this.accessories.get(uuid);
         if (!accessory) {
           accessory = new this.api.platformAccessory(fire.friendlyName, uuid);
           accessory.context.fire = fire;
+          // Attach the handler before registering so the accessory is fully
+          // configured (services, handlers, primary service) when HomeKit
+          // first sees it.
+          this.attach(accessory, fire);
           this.api.registerPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
           this.accessories.set(uuid, accessory);
           this.log.info(`Added Flame Connect fireplace: ${fire.friendlyName}`);
+        } else {
+          this.attach(accessory, fire);
         }
-        const handler = this.attach(accessory, fire);
+        const handler = this.handlers.get(uuid);
         const controls = [
           ['Fireplace', handler.powerService], ['Flames', handler.flameService],
           ['Heater', handler.heatService], ['Eco Mode', handler.ecoService],
@@ -111,6 +159,18 @@ export class FlameConnectPlatform {
         refreshes.push({ fire, handler });
       }
 
+      // Remove stale accessories before the first refresh: a removed device's
+      // handler must not consume a refresh slot or briefly reappear.
+      for (const [uuid, accessory] of this.accessories) {
+        if (!discovered.has(uuid)) {
+          this.log.info(`Removing stale Flame Connect accessory: ${accessory.displayName}`);
+          this.handlers.get(uuid)?.dispose();
+          this.api.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
+          this.accessories.delete(uuid);
+          this.handlers.delete(uuid);
+        }
+      }
+
       const refreshResults = await mapWithConcurrency(
         refreshes,
         3,
@@ -121,16 +181,6 @@ export class FlameConnectPlatform {
         if (result.status === 'fulfilled') this.log.info(`Ready: ${fire.friendlyName}`);
         else this.log.warn(`Could not refresh ${fire.friendlyName}: ${result.reason?.message || result.reason}`);
       });
-
-      for (const [uuid, accessory] of this.accessories) {
-        if (!discovered.has(uuid)) {
-          this.log.info(`Removing stale Flame Connect accessory: ${accessory.displayName}`);
-          this.handlers.get(uuid)?.dispose();
-          this.api.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
-          this.accessories.delete(uuid);
-          this.handlers.delete(uuid);
-        }
-      }
 
       if (!fires.length) {
         this.log.warn('Flame Connect account returned no fireplaces.');

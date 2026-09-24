@@ -153,3 +153,73 @@ test('repeated token endpoint HTTP 503s are marked as cloud errors', async () =>
     globalThis.fetch = original;
   }
 });
+
+test('a crashed token save cannot leave a truncated token file behind', async () => {
+  const { readdir, readFile, stat } = await import('node:fs/promises');
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'flame-auth-'));
+  try {
+    const tokenFile = path.join(dir, 'tokens.json');
+    const auth = new FlameConnectAuth({ tokenFile, log: { debug() {}, info() {}, warn() {}, error() {} } });
+    auth.state.refreshToken = 'refresh-1';
+    auth.state.accessToken = 'access-1';
+    auth.state.expiresAt = Date.now() + 3600_000;
+    // Simulate a crash mid-save: a leftover temp file and a truncated token file.
+    await writeFile(`${tokenFile}.${process.pid}.tmp`, '{"truncated": tru');
+    await writeFile(tokenFile, '{"truncated": tru');
+    await auth.save();
+    const parsed = JSON.parse(await readFile(tokenFile, 'utf8'));
+    assert.equal(parsed.refreshToken, 'refresh-1');
+    assert.equal(parsed.accessToken, 'access-1');
+    assert.deepEqual((await readdir(dir)).filter((f) => f.endsWith('.tmp')), []);
+    assert.equal((await stat(tokenFile)).mode & 0o777, 0o600);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a refresh rejected after another process rotated the token retries once with the stored token', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'flame-auth-'));
+  const original = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async (_url, options) => {
+    calls += 1;
+    if (String(options.body).includes('refresh_token=stale-token')) {
+      return { ok: false, status: 400, text: async () => JSON.stringify({ error: 'invalid_grant' }) };
+    }
+    return {
+      ok: true, status: 200,
+      text: async () => JSON.stringify({ access_token: 'fresh-access', refresh_token: 'rotated-token', expires_in: 3600 }),
+    };
+  };
+  try {
+    const tokenFile = path.join(dir, 'tokens.json');
+    const auth = new FlameConnectAuth({ tokenFile, log: { debug() {}, info() {}, warn() {}, error() {} } });
+    auth.state.refreshToken = 'stale-token';
+    // Another process (the settings-page validator) rotated the token file.
+    await writeFile(tokenFile, JSON.stringify({ refreshToken: 'rotated-token' }));
+    const token = await auth.performRefresh();
+    assert.equal(token, 'fresh-access');
+    assert.equal(auth.state.refreshToken, 'rotated-token');
+    assert.equal(calls, 2);
+  } finally {
+    globalThis.fetch = original;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a rejected refresh with no rotation clears state and surfaces re-auth', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'flame-auth-'));
+  const original = globalThis.fetch;
+  globalThis.fetch = async () => ({ ok: false, status: 400, text: async () => JSON.stringify({ error: 'invalid_grant' }) });
+  try {
+    const tokenFile = path.join(dir, 'tokens.json');
+    const auth = new FlameConnectAuth({ tokenFile, log: { debug() {}, info() {}, warn() {}, error() {} } });
+    auth.state.refreshToken = 'dead-token';
+    await writeFile(tokenFile, JSON.stringify({ refreshToken: 'dead-token' }));
+    await assert.rejects(auth.performRefresh(), (error) => error.code === 'FLAMECONNECT_REAUTH_REQUIRED');
+    assert.equal(auth.state.accessToken, '');
+  } finally {
+    globalThis.fetch = original;
+    await rm(dir, { recursive: true, force: true });
+  }
+});

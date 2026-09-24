@@ -11,6 +11,19 @@ import { loginWithCredentials } from '../src/flameconnect/b2c-login.js';
 import { FlameConnectClient } from '../src/flameconnect/client.js';
 
 const SESSION_LIFETIME_MS = 10 * 60_000;
+// Backstop for UI server requests: inner operations (B2C login, cloud client)
+// carry their own shorter deadlines with specific messages; this only guards
+// against something hanging outside them.
+const UI_REQUEST_TIMEOUT_MS = 120_000;
+
+function withUiTimeout(promise, operation) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${operation} timed out.`)), UI_REQUEST_TIMEOUT_MS);
+    timer.unref?.();
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
 
 class FlameConnectUiServer extends HomebridgePluginUiServer {
   constructor() {
@@ -45,7 +58,9 @@ class FlameConnectUiServer extends HomebridgePluginUiServer {
     }
     try {
       const code = parseAuthorizationRedirect(payload.redirectUrl, session.state);
-      const token = await exchangeAuthorizationCode(code, session.verifier);
+      const token = await withUiTimeout(
+        exchangeAuthorizationCode(code, session.verifier), 'Flame Connect sign-in',
+      );
       if (!token.refresh_token) throw new Error('Flame Connect did not return a refresh token.');
       return { refreshToken: token.refresh_token };
     } catch (error) {
@@ -61,9 +76,13 @@ class FlameConnectUiServer extends HomebridgePluginUiServer {
     }
     try {
       const request = buildAuthorizationRequest();
-      const redirect = await loginWithCredentials(request.url, email, password);
+      const redirect = await withUiTimeout(
+        loginWithCredentials(request.url, email, password), 'Flame Connect sign-in',
+      );
       const code = parseAuthorizationRedirect(redirect, request.state);
-      const token = await exchangeAuthorizationCode(code, request.verifier);
+      const token = await withUiTimeout(
+        exchangeAuthorizationCode(code, request.verifier), 'Flame Connect sign-in',
+      );
       if (!token.refresh_token) throw new Error('Flame Connect did not return a refresh token.');
       return { refreshToken: token.refresh_token };
     } catch (error) {
@@ -81,7 +100,7 @@ class FlameConnectUiServer extends HomebridgePluginUiServer {
     const auth = new FlameConnectAuth({ refreshToken, tokenFile });
     const client = new FlameConnectClient(auth);
     try {
-      await client.getFires();
+      await withUiTimeout(client.getFires(), 'Flame Connect sign-in check');
       return { status: 'valid' };
     } catch (error) {
       if (error?.code === 'FLAMECONNECT_NO_TOKEN') return { status: 'not_configured' };

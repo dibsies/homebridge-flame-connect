@@ -1,5 +1,5 @@
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import {
   API_SCOPE,
@@ -217,8 +217,14 @@ export class FlameConnectAuth {
   async save() {
     if (!this.tokenFile) return;
     await mkdir(path.dirname(this.tokenFile), { recursive: true });
+    // Write to a temporary file and rename atomically: an interrupted save
+    // must never leave a truncated token file behind.
+    const temporary = `${this.tokenFile}.${process.pid}.tmp`;
+    // A previous crashed save may have left a temp file behind with stale
+    // permissions; remove it so the write below creates the file with 0o600.
+    await rm(temporary, { force: true });
     await writeFile(
-      this.tokenFile,
+      temporary,
       JSON.stringify({
         accessToken: this.state.accessToken,
         refreshToken: this.state.refreshToken,
@@ -226,6 +232,20 @@ export class FlameConnectAuth {
       }, null, 2),
       { mode: 0o600 },
     );
+    await rename(temporary, this.tokenFile);
+  }
+
+  // Read the persisted refresh token without disturbing in-memory state. Used
+  // to recover when another process (for example the settings-page validator)
+  // rotated the token after this instance loaded it.
+  async readStoredRefreshToken() {
+    if (!this.tokenFile) return '';
+    try {
+      const stored = JSON.parse(await readFile(this.tokenFile, 'utf8'));
+      return stored.refreshToken || '';
+    } catch {
+      return '';
+    }
   }
 
   async getAccessToken(forceRefresh = false) {
@@ -257,6 +277,16 @@ export class FlameConnectAuth {
       data = await exchangeRefreshToken(this.state.refreshToken);
     } catch (error) {
       if (error?.code === 'FLAMECONNECT_REAUTH_REQUIRED') {
+        // Another owner (for example the settings-page validator) may have
+        // rotated the refresh token after this instance loaded it. The token
+        // file is the coordination point: if it now holds a different refresh
+        // token, retry once with that one before asking the user to sign in.
+        const stored = await this.readStoredRefreshToken();
+        if (stored && stored !== this.state.refreshToken) {
+          this.log?.debug?.('Flame Connect refresh token was rotated by another process; retrying with the stored token.');
+          this.state.refreshToken = stored;
+          return this.performRefresh();
+        }
         this.state.accessToken = '';
         this.state.expiresAt = 0;
         await this.save();

@@ -57,3 +57,31 @@ test('credential login refuses to submit to an unexpected host', async () => {
     /unexpected host/u,
   );
 });
+
+test('every credential-login request carries an abort signal', async () => {
+  const state = 'signal-state';
+  const redirect = `msal${CLIENT_ID}://auth?code=authorization-code&state=${state}`;
+  const responses = [
+    {
+      status: 200, url: `https://${TENANT_HOST}/tenant/policy/oauth2/v2.0/authorize`,
+      headers: headers({}, ['session=one; Path=/']),
+      text: async () => 'var SETTINGS = {"csrf":"csrf-value","transId":"tx-value"};',
+    },
+    {
+      status: 200, url: '', headers: headers({}, ['session=two; Path=/']),
+      text: async () => JSON.stringify({ status: '200' }),
+    },
+    {
+      status: 302, url: '', headers: headers({ location: redirect }), text: async () => '',
+    },
+  ];
+  const fetchImpl = async (url, options) => {
+    assert.ok(options.signal instanceof AbortSignal, 'each step must be abortable');
+    return responses.shift();
+  };
+  const result = await loginWithCredentials(
+    `https://${TENANT_HOST}/tenant/policy/oauth2/v2.0/authorize`,
+    'person@example.com', 'temporary-password', fetchImpl,
+  );
+  assert.equal(result, redirect);
+});

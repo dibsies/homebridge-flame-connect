@@ -200,3 +200,94 @@ test('overview transient result code recovers on its single safe read retry', as
     globalThis.fetch = original;
   }
 });
+
+test('a 401 on a GET transparently retries after refreshing auth', async () => {
+  const original = globalThis.fetch;
+  let calls = 0;
+  let refreshes = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    if (calls === 1) return { ok: false, status: 401, text: async () => 'unauthorized' };
+    return { ok: true, status: 200, text: async () => '[]' };
+  };
+  try {
+    const auth = { getAccessToken: async (force) => { if (force) refreshes += 1; return 'token'; } };
+    const client = new FlameConnectClient(auth, null);
+    const fires = await client.getFires();
+    assert.deepEqual(fires, []);
+    assert.equal(calls, 2);
+    assert.equal(refreshes, 1);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('a 401 on a write refreshes auth but never replays the write', async () => {
+  const original = globalThis.fetch;
+  let calls = 0;
+  let refreshes = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return { ok: false, status: 401, text: async () => 'unauthorized' };
+  };
+  try {
+    const auth = { getAccessToken: async (force) => { if (force) refreshes += 1; return 'token'; } };
+    const client = new FlameConnectClient(auth, null);
+    await assert.rejects(
+      client.writeParameters('fire', []),
+      (error) => error.code === 'FLAMECONNECT_WRITE_AUTH_REFRESHED'
+        && !error.message.includes('fire'),
+    );
+    assert.equal(calls, 1);
+    assert.equal(refreshes, 1);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('getFires rejects non-array responses and dedupes repeated fireIds', async () => {
+  const original = globalThis.fetch;
+  const bodies = [
+    JSON.stringify({ fires: [] }),
+    JSON.stringify([
+      { FireId: 'a', Name: 'One' },
+      { Name: 'Missing id' },
+      { FireId: 'a', Name: 'Duplicate' },
+      { FireId: 'b', Name: 'Two' },
+    ]),
+  ];
+  globalThis.fetch = async () => ({ ok: true, status: 200, text: async () => bodies.shift() });
+  try {
+    const client = new FlameConnectClient({ getAccessToken: async () => 'token' }, null);
+    await assert.rejects(client.getFires(), /unexpected device list/);
+    const fires = await client.getFires();
+    assert.deepEqual(fires.map((f) => f.fireId), ['a', 'b']);
+  } finally {
+    globalThis.fetch = original;
+  }
+});
+
+test('getFireOverview reports undecoded parameters instead of dropping them silently', async () => {
+  const original = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    text: async () => JSON.stringify({
+      ResultCode: 0,
+      WifiFireOverview: {
+        FireId: 'fire',
+        Parameters: [
+          { ParameterId: 322, Value: 'AAAA' },
+        ],
+      },
+    }),
+  });
+  try {
+    const client = new FlameConnectClient({ getAccessToken: async () => 'token' }, null);
+    const overview = await client.getFireOverview('fire');
+    assert.deepEqual(overview.decodeErrors, [322]);
+    assert.deepEqual(overview.parameters, {});
+  } finally {
+    globalThis.fetch = original;
+  }
+});
