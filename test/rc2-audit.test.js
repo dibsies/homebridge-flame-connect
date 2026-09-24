@@ -267,3 +267,69 @@ test('only one accessory is marked primary', () => {
   assert.equal(primaries.length, 1);
   assert.equal(primaries[0].subtype, 'power');
 });
+
+test('a parameter that disappears on a later refresh is dropped, not retained as current', async () => {
+  const f = fixture();
+  await f.handler.refresh();
+  assert.ok(f.handler.state.flame, 'flame parameter present after the first overview');
+  const originalFlame = structuredClone(f.remote().flame);
+  // The cloud stops reporting the flame parameter on the next overview.
+  const reduced = structuredClone(f.remote());
+  delete reduced.flame;
+  f.client.getFireOverview = async () => ({ parameters: structuredClone(reduced) });
+  await f.handler.refresh();
+  assert.equal(f.handler.state.flame, undefined, 'a disappeared parameter must be dropped, not retained as current');
+  // A write built on the dropped parameter fails loudly instead of sending a
+  // stale value to the cloud.
+  await assert.rejects(f.handler.setFlames(true), /did not report/);
+  // Flame-derived controls are removed; the core flames control stays.
+  assert.equal(f.handler.speedService, undefined);
+  assert.equal(f.handler.mediaService, undefined);
+  assert.equal(f.handler.overheadService, undefined);
+  assert.ok(f.handler.flameService);
+  // The parameter coming back restores normal behavior.
+  f.remote().flame = originalFlame;
+  f.client.getFireOverview = async () => ({ parameters: structuredClone(f.remote()) });
+  await f.handler.refresh();
+  assert.ok(f.handler.state.flame, 'a restored parameter is current again');
+});
+
+test('a cold-start read timeout returns a communication error instead of reporting off', { timeout: 30000 }, async () => {
+  const f = fixture();
+  f.client.getFireOverview = () => new Promise(() => {}); // hangs forever
+  const error = await f.handler.getPower().catch((e) => e);
+  assert.ok(isCloudError(error), 'cold start must fail, not report defaults');
+  assert.equal(error.kind, 'timeout');
+});
+
+test('a command that reaches its HomeKit deadline before starting is cancelled and never executes', { timeout: 30000 }, async () => {
+  const f = fixture();
+  await f.handler.refresh();
+  // The first command occupies the queue with a hung write; the second waits
+  // behind it and reaches its 8s HomeKit deadline before starting.
+  let releaseFirst;
+  const firstGate = new Promise((resolve) => { releaseFirst = resolve; });
+  const executed = [];
+  let calls = 0;
+  f.client.writeParameters = async (_id, entries) => {
+    calls += 1;
+    executed.push(entries.map((e) => decodeParameter(e.parameterId, e.value).type));
+    if (calls === 1) await firstGate; // the power write hangs
+  };
+  const first = f.handler.setPower(false);
+  // HomeKit holds the characteristic-write promise from the start, so attach
+  // its settlement handler immediately.
+  const firstSettled = first.catch((e) => e);
+  const secondError = await f.handler.setFlames(false).catch((e) => e);
+  assert.ok(isCloudError(secondError) && secondError.kind === 'timeout');
+  // The first write completes normally in the background after Home already
+  // reported the second command as failed. The first command's own HomeKit
+  // call also timed out (it was still in flight), which is the intended
+  // "finish and reconcile" path for started writes.
+  releaseFirst();
+  const firstError = await firstSettled;
+  assert.ok(isCloudError(firstError) && firstError.kind === 'timeout');
+  // Let the queue drain the cancelled entry.
+  await new Promise((r) => setTimeout(r, 100));
+  assert.deepEqual(executed, [['mode']], 'the cancelled command must never reach the cloud');
+});

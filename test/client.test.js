@@ -214,7 +214,7 @@ test('a 401 on a GET transparently retries after refreshing auth', async () => {
     const auth = { getAccessToken: async (force) => { if (force) refreshes += 1; return 'token'; } };
     const client = new FlameConnectClient(auth, null);
     const fires = await client.getFires();
-    assert.deepEqual(fires, []);
+    assert.deepEqual(fires, { fires: [], malformed: false });
     assert.equal(calls, 2);
     assert.equal(refreshes, 1);
   } finally {
@@ -260,8 +260,10 @@ test('getFires rejects non-array responses and dedupes repeated fireIds', async 
   try {
     const client = new FlameConnectClient({ getAccessToken: async () => 'token' }, null);
     await assert.rejects(client.getFires(), /unexpected device list/);
-    const fires = await client.getFires();
+    const { fires, malformed } = await client.getFires();
     assert.deepEqual(fires.map((f) => f.fireId), ['a', 'b']);
+    // The record without an identifier makes the list partially untrustworthy.
+    assert.equal(malformed, true);
   } finally {
     globalThis.fetch = original;
   }

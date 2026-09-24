@@ -121,7 +121,7 @@ export class FlameConnectPlatform {
   async discoverDevices() {
     try {
       this.log.info('Connecting to Flame Connect...');
-      const fires = await this.client.getFires();
+      const { fires, malformed } = await this.client.getFires();
       const discovered = new Set();
       const refreshes = [];
 
@@ -161,13 +161,21 @@ export class FlameConnectPlatform {
 
       // Remove stale accessories before the first refresh: a removed device's
       // handler must not consume a refresh slot or briefly reappear.
-      for (const [uuid, accessory] of this.accessories) {
-        if (!discovered.has(uuid)) {
-          this.log.info(`Removing stale Flame Connect accessory: ${accessory.displayName}`);
-          this.handlers.get(uuid)?.dispose();
-          this.api.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
-          this.accessories.delete(uuid);
-          this.handlers.delete(uuid);
+      // A device list containing records without identifiers is not
+      // authoritative — an accessory missing from it may simply have been
+      // dropped from the malformed response — so fail closed and keep
+      // existing accessories instead of unregistering anything.
+      if (malformed) {
+        this.log.warn('Flame Connect device list contained invalid records; keeping existing accessories.');
+      } else {
+        for (const [uuid, accessory] of this.accessories) {
+          if (!discovered.has(uuid)) {
+            this.log.info(`Removing stale Flame Connect accessory: ${accessory.displayName}`);
+            this.handlers.get(uuid)?.dispose();
+            this.api.unregisterPlatformAccessories(PLUGIN_NAME, PLATFORM_NAME, [accessory]);
+            this.accessories.delete(uuid);
+            this.handlers.delete(uuid);
+          }
         }
       }
 

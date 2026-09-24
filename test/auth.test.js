@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -218,6 +218,37 @@ test('a rejected refresh with no rotation clears state and surfaces re-auth', as
     await writeFile(tokenFile, JSON.stringify({ refreshToken: 'dead-token' }));
     await assert.rejects(auth.performRefresh(), (error) => error.code === 'FLAMECONNECT_REAUTH_REQUIRED');
     assert.equal(auth.state.accessToken, '');
+  } finally {
+    globalThis.fetch = original;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('an invalid_grant after a concurrent rotation never overwrites the newer token', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'flame-auth-'));
+  const original = globalThis.fetch;
+  // Every refresh attempt is rejected: the saved token is revoked.
+  globalThis.fetch = async () => ({ ok: false, status: 400, text: async () => JSON.stringify({ error: 'invalid_grant' }) });
+  try {
+    const tokenFile = path.join(dir, 'tokens.json');
+    const auth = new FlameConnectAuth({ tokenFile, log: { debug() {}, info() {}, warn() {}, error() {} } });
+    auth.state.refreshToken = 'dead-token';
+    await writeFile(tokenFile, JSON.stringify({ refreshToken: 'dead-token' }));
+    // Another process rotates the token file between this instance's stored-
+    // token check and its failure-handling save.
+    let reads = 0;
+    const readStored = auth.readStoredRefreshToken.bind(auth);
+    auth.readStoredRefreshToken = async () => {
+      reads += 1;
+      if (reads === 2) {
+        await writeFile(tokenFile, JSON.stringify({ refreshToken: 'fresh-token' }));
+      }
+      return readStored();
+    };
+    await assert.rejects(auth.performRefresh(), (error) => error.code === 'FLAMECONNECT_REAUTH_REQUIRED');
+    const stored = JSON.parse(await readFile(tokenFile, 'utf8'));
+    assert.equal(stored.refreshToken, 'fresh-token', 'the newer rotated token must not be clobbered');
+    assert.equal(auth.state.refreshToken, 'fresh-token', 'the instance adopts the rotated token');
   } finally {
     globalThis.fetch = original;
     await rm(dir, { recursive: true, force: true });

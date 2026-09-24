@@ -277,7 +277,7 @@ export class FlameConnectAuth {
       data = await exchangeRefreshToken(this.state.refreshToken);
     } catch (error) {
       if (error?.code === 'FLAMECONNECT_REAUTH_REQUIRED') {
-        // Another owner (for example the settings-page validator) may have
+        // Another process (for example the settings-page validator) may have
         // rotated the refresh token after this instance loaded it. The token
         // file is the coordination point: if it now holds a different refresh
         // token, retry once with that one before asking the user to sign in.
@@ -287,9 +287,20 @@ export class FlameConnectAuth {
           this.state.refreshToken = stored;
           return this.performRefresh();
         }
+        // No newer token exists. Clear in-memory credentials, but only clear
+        // the file if it still holds the token we just proved invalid: the
+        // other process may have rotated between our check and this save, and
+        // overwriting that newer token would be a lost update.
         this.state.accessToken = '';
         this.state.expiresAt = 0;
-        await this.save();
+        const latest = await this.readStoredRefreshToken();
+        if (!this.tokenFile || !latest || latest === this.state.refreshToken) {
+          this.state.refreshToken = '';
+          await this.save();
+        } else {
+          this.state.refreshToken = latest;
+          this.log?.debug?.('Flame Connect token file was rotated during sign-in failure handling; keeping the newer token.');
+        }
       }
       throw error;
     }

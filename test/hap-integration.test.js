@@ -91,3 +91,45 @@ test('real HAP: capability loss removes the service from the accessory', async (
   assert.equal(f.handler.boostService, undefined);
   assert.ok(!f.accessory.services.some((s) => s.subtype === 'turbo-boost'));
 });
+
+test('real HAP: the primary service is assigned through setPrimaryService', async () => {
+  const calls = [];
+  const original = Service.prototype.setPrimaryService;
+  Service.prototype.setPrimaryService = function (isPrimary) {
+    calls.push([this.subtype, isPrimary]);
+    return original.call(this, isPrimary);
+  };
+  try {
+    const f = realFixture();
+    await f.handler.refresh();
+    const trueCalls = calls.filter(([, value]) => value === true);
+    assert.equal(trueCalls.length, 1, 'exactly one service is marked primary through the HAP API');
+    assert.equal(trueCalls[0][0], 'power');
+    const primaries = f.accessory.services.filter((s) => s.isPrimaryService);
+    assert.equal(primaries.length, 1);
+    assert.equal(primaries[0].subtype, 'power');
+    // Moving the primary emits a configuration-change event so a published
+    // accessory picks up the change; direct assignment would not.
+    const events = [];
+    f.handler.flameService.on('service-configurationChange', () => events.push('flames'));
+    f.platform.config = { ...f.platform.config, exposePower: false };
+    f.handler.syncServices();
+    assert.equal(f.handler.powerService, undefined);
+    assert.equal(f.handler.flameService.isPrimaryService, true);
+    // (A second configuration-change event comes from HAP unlinking the
+    // removed power service; what matters is the primary change emits.)
+    assert.ok(events.length >= 1, 'the primary-service change must emit a configuration-change event');
+    f.handler.dispose();
+  } finally {
+    Service.prototype.setPrimaryService = original;
+  }
+});
+
+test('real HAP: a cold-start read timeout surfaces as a HomeKit communication error', { timeout: 30000 }, async () => {
+  const f = realFixture();
+  f.client.getFireOverview = () => new Promise(() => {}); // hangs forever
+  const error = await f.handler.getPower().catch((e) => e);
+  assert.ok(error instanceof HapStatusError, `expected HapStatusError, got ${error?.constructor?.name}`);
+  assert.equal(error.hapStatus, HAPStatus.OPERATION_TIMED_OUT);
+  f.handler.dispose();
+});

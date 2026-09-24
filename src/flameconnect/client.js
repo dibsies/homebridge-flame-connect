@@ -146,9 +146,16 @@ export class FlameConnectClient {
     }
     const seen = new Set();
     const fires = [];
+    // A list containing records without identifiers is only partially
+    // trustworthy: an accessory missing from it may simply have been dropped
+    // from the malformed response, so callers must not treat the list as
+    // authoritative for unregistration. Duplicates are not malformed — the
+    // device is still authoritatively present.
+    let malformed = false;
     for (const entry of data) {
       const fire = parseFire(entry);
       if (!fire.fireId) {
+        malformed = true;
         this.log?.warn?.('Flame Connect returned a device record without an identifier; ignoring it.');
         continue;
       }
@@ -159,7 +166,7 @@ export class FlameConnectClient {
       seen.add(fire.fireId);
       fires.push(fire);
     }
-    return fires;
+    return { fires, malformed };
   }
 
   async getFireOverview(fireId, retried = false) {

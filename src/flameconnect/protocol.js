@@ -23,6 +23,26 @@ function encodeTemperature(value) {
   return Buffer.from([Math.floor(tenths / 10), tenths % 10]);
 }
 
+// Maps a parameter id to the state key decodeParameter would file it under.
+// Used to keep a parameter that failed to decode marked as present (its
+// last-good value is retained with a warning) rather than treating it as
+// disappeared from the overview.
+export function parameterTypeForId(parameterId) {
+  switch (Number(parameterId)) {
+    case ParameterId.TEMPERATURE_UNIT: return 'temperatureUnit';
+    case ParameterId.MODE: return 'mode';
+    case ParameterId.FLAME_EFFECT: return 'flame';
+    case ParameterId.HEAT_SETTINGS: return 'heat';
+    case ParameterId.HEAT_MODE: return 'heatMode';
+    case ParameterId.TIMER: return 'timer';
+    case ParameterId.LOG_EFFECT: return 'log';
+    case ParameterId.SOFTWARE_VERSION: return 'softwareVersion';
+    case ParameterId.ERROR: return 'error';
+    case ParameterId.SOUND: return 'sound';
+    default: return 'unknown';
+  }
+}
+
 export function decodeParameter(parameterId, base64Value) {
   const raw = Buffer.from(base64Value, 'base64');
 

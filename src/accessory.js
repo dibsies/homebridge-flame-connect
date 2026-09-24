@@ -1,6 +1,7 @@
 import { Brightness, FireMode, HeatMode, OnOff } from './flameconnect/client.js';
 import { hsvToRgbw, rgbwToHsv } from './flameconnect/color.js';
 import { FlameConnectCloudError, isCloudError } from './flameconnect/errors.js';
+import { parameterTypeForId } from './flameconnect/protocol.js';
 
 // HomeKit expects characteristic handlers to settle quickly; the installed
 // HAP-NodeJS times out reads and writes after roughly nine seconds. Every
@@ -88,6 +89,10 @@ export class FlameConnectAccessory {
     this.fire = fire;
     this.state = {};
     this.lastRefresh = 0;
+    // State keys confirmed present by the most recent overview. A parameter
+    // that disappears on a later overview is dropped from state rather than
+    // retained as if it were still current.
+    this.confirmedParameters = new Set();
     // Monotonic state version. A refresh that started before a command
     // completed carries older data and must never overwrite the command's
     // newer state when it lands late.
@@ -327,7 +332,18 @@ export class FlameConnectAccessory {
       || this.mediaService || this.overheadService || this.logService;
     for (const service of [this.powerService, this.flameService, this.heatService,
       this.mediaService, this.overheadService, this.logService]) {
-      if (service) service.isPrimaryService = service === primaryService;
+      if (!service) continue;
+      const primary = service === primaryService;
+      if (typeof service.setPrimaryService === 'function') {
+        // setPrimaryService emits a configuration-change event so a published
+        // accessory picks up the change; assigning isPrimaryService directly
+        // does not. Only call it when the value changes to avoid event noise
+        // on every refresh. Unit-test mocks predate the method, so fall back
+        // to direct assignment there.
+        if (service.isPrimaryService !== primary) service.setPrimaryService(primary);
+      } else {
+        service.isPrimaryService = primary;
+      }
     }
     for (const [service, key] of [[this.mediaService, 'mediaColor'], [this.overheadService, 'overheadColor']]) {
       if (!service) continue;
@@ -349,6 +365,12 @@ export class FlameConnectAccessory {
   enqueueCommand(operation, label = 'command') {
     if (this.disposed) return Promise.reject(new Error('Flame Connect accessory is shutting down.'));
     const queuedAt = Date.now();
+    // Lifecycle of this queue entry. withWriteDeadline cancels the entry when
+    // the HomeKit response window elapses before it starts: executing later,
+    // after Home already reported failure, would change the fireplace
+    // silently. Once started, the operation runs to completion and reconciles
+    // (a sent write can no longer be un-sent).
+    const entry = { started: false, cancelled: false };
     this.queueDepth += 1;
     if (this.queueDepth > 1) {
       this.platform.log?.debug?.(`Flame Connect command queued (${this.queueDepth} pending).`);
@@ -359,8 +381,14 @@ export class FlameConnectAccessory {
         if (waitedMs > 250) {
           this.platform.log?.debug?.(`Flame Connect command waited ${waitedMs}ms in the queue.`);
         }
+        if (entry.cancelled) {
+          const error = new Error(`Flame Connect ${label} was cancelled before it started.`);
+          error.code = 'FLAMECONNECT_COMMAND_CANCELLED';
+          throw error;
+        }
         if (this.disposed) throw new Error('Flame Connect accessory is shutting down.');
         if (Date.now() < this.cloudFailureUntil && this.lastCloudError) throw this.lastCloudError;
+        entry.started = true;
         return this.runOperationWithAuthRetry(operation, label);
       })
       .then((value) => {
@@ -379,6 +407,8 @@ export class FlameConnectAccessory {
         this.queueDepth = Math.max(0, this.queueDepth - 1);
       });
     this.commandQueue = pending.catch(() => {});
+    pending.cancelIfQueued = () => { entry.cancelled = true; };
+    pending.hasStarted = () => entry.started;
     return pending;
   }
 
@@ -430,14 +460,23 @@ export class FlameConnectAccessory {
   }
 
   // HomeKit characteristic writes must settle inside the HAP response window.
-  // On deadline the caller gets OPERATION_TIMED_OUT while the queued command
-  // keeps running and reconciles via pushStateToHomeKit on completion.
+  // On deadline the caller gets OPERATION_TIMED_OUT. A command that never
+  // started is cancelled outright so it cannot silently execute later, after
+  // Home already reported the failure; a command already underway keeps
+  // running and reconciles via pushStateToHomeKit on completion.
   withWriteDeadline(promise, label) {
     return withTimeout(promise, HAP_HANDLER_TIMEOUT_MS, `Flame Connect ${label}`).catch((error) => {
       if (error?.code !== 'FLAMECONNECT_HAP_DEADLINE') throw error;
-      this.platform.log?.warn?.(
-        `Flame Connect ${label} did not finish within the HomeKit response window; reconciling in the background without replaying the write.`,
-      );
+      if (typeof promise.cancelIfQueued === 'function' && promise.hasStarted?.() === false) {
+        promise.cancelIfQueued();
+        this.platform.log?.warn?.(
+          `Flame Connect ${label} had not started when the HomeKit response window elapsed; it was cancelled and will not execute.`,
+        );
+      } else {
+        this.platform.log?.warn?.(
+          `Flame Connect ${label} did not finish within the HomeKit response window; reconciling in the background without replaying the write.`,
+        );
+      }
       throw this.toHapError(new FlameConnectCloudError(
         `Flame Connect ${label} timed out waiting for the cloud.`,
         { kind: 'timeout' },
@@ -508,6 +547,15 @@ export class FlameConnectAccessory {
       return await withTimeout(this.refresh(), HAP_HANDLER_TIMEOUT_MS, 'Flame Connect read');
     } catch (error) {
       if (error?.code === 'FLAMECONNECT_HAP_DEADLINE') {
+        if (this.lastRefresh === 0) {
+          // Cold start with no confirmed state: there is nothing truthful to
+          // serve, and reporting defaults (e.g. "off") would mislead. Fail as
+          // a communication error so Home shows "No Response" instead.
+          throw this.toHapError(new FlameConnectCloudError(
+            'Flame Connect did not respond in time.',
+            { kind: 'timeout' },
+          ));
+        }
         this.platform.log?.debug?.('Flame Connect read exceeded the HomeKit response window; serving last known state.');
         return this.state;
       }
@@ -575,6 +623,11 @@ export class FlameConnectAccessory {
     }
     pending.changes[field] = value;
     const result = new Promise((resolve, reject) => pending.waiters.push({ resolve, reject }));
+    // Propagate queue-entry cancellation to the underlying color operation: a
+    // coalesced color that never started must not recolor the light later,
+    // after Home already reported the write as failed.
+    result.cancelIfQueued = () => pending.operation.cancelIfQueued?.();
+    result.hasStarted = () => pending.operation.hasStarted?.() ?? false;
     // Trailing edge: every new component restarts the window, so a slow
     // gesture coalesces into a single cloud write.
     if (pending.timer) clearTimeout(pending.timer);
@@ -681,6 +734,20 @@ export class FlameConnectAccessory {
           return this.state;
         }
         const merged = { ...this.state, ...overview.parameters };
+        // A parameter confirmed by an earlier overview but absent from this
+        // one is stale, not current: drop it instead of retaining old values
+        // as if they were freshly confirmed. A dropped parameter fails writes
+        // (the client refuses a null base) and stops being reported as
+        // current state. Parameters that failed to decode stay confirmed —
+        // their last-good values are retained with a warning below.
+        const confirmed = new Set([
+          ...Object.keys(overview.parameters || {}),
+          ...(overview.decodeErrors || []).map((id) => parameterTypeForId(id)),
+        ]);
+        for (const key of this.confirmedParameters) {
+          if (!confirmed.has(key)) delete merged[key];
+        }
+        this.confirmedParameters = confirmed;
         const decodeErrors = overview.decodeErrors || [];
         if (decodeErrors.length > 0 && Object.keys(this.state).length === 0) {
           // Nothing usable to fall back to: fail loudly instead of marking
