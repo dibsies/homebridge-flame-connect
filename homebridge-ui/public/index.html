@@ -2,7 +2,11 @@
   .flame-auth { margin-bottom: 1rem; }
   .flame-auth .steps { margin: .75rem 0; padding-left: 1.25rem; }
   .flame-auth textarea { min-height: 6rem; }
-  .flame-auth .status { margin-top: .75rem; }
+  .flame-auth .status { margin-top: .75rem; font-weight: 600; }
+  .flame-auth .status-valid { color: #1e7e34; }
+  .flame-auth .status-reauth { color: #c82333; }
+  .flame-auth .status-temp { color: #9a6b1a; }
+  .flame-auth .status-neutral { color: inherit; font-weight: 400; }
   .flame-auth .open-link { display: none; margin-left: .5rem; }
 </style>
 
@@ -55,35 +59,53 @@
       pluginConfig[0].name ||= 'Flame Connect';
       pluginConfig[0].refreshToken = refreshToken;
       pluginConfig = await homebridge.updatePluginConfig(pluginConfig);
-      status.textContent = 'Sign-in succeeded. Select Save to apply the new token, then restart Homebridge.';
+      setStatus('✓ Sign-in succeeded. Select Save to apply the new token, then restart Homebridge.', 'status-valid');
       homebridge.toast.success('Select Save to apply the new sign-in.', 'Flame Connect connected');
     };
 
     let validationSequence = 0;
     let validationTimer;
+    let validationActive = false;
+    let validationQueued = false;
+    const setStatus = (text, className) => {
+      status.textContent = text;
+      status.className = `status ${className}`;
+    };
     const updateStatus = async () => {
-      const sequence = ++validationSequence;
-      if (!pluginConfig[0]?.refreshToken && !pluginConfig[0]?.tokenFile) {
-        status.textContent = 'No Flame Connect sign-in is currently saved.';
+      // Rate-limit: never run two validations concurrently; a change that
+      // arrives mid-validation re-runs once afterwards instead of piling up.
+      if (validationActive) {
+        validationQueued = true;
         return;
       }
-      status.textContent = 'Checking the saved Flame Connect sign-in…';
+      validationActive = true;
+      const sequence = ++validationSequence;
       try {
+        // Always validate: a default token file may exist even when both
+        // visible config fields are blank.
+        setStatus('… Checking the saved Flame Connect sign-in…', 'status-neutral');
         const result = await homebridge.request('/auth/validate', {
           refreshToken: pluginConfig[0]?.refreshToken || '',
           tokenFile: pluginConfig[0]?.tokenFile || '',
         });
         if (sequence !== validationSequence) return;
         const messages = {
-          valid: 'Flame Connect is signed in and the saved token is valid. You only need to sign in again if the plugin prompts you to renew authentication.',
-          reauth_required: 'The saved sign-in has expired or was revoked. Sign in again below.',
-          temporarily_unavailable: 'The saved sign-in could not be checked because Flame Connect is temporarily unavailable. This does not necessarily mean the token is invalid.',
-          not_configured: 'No Flame Connect sign-in is currently saved.',
+          valid: ['✓ Flame Connect is signed in and the saved token is valid. You only need to sign in again if the plugin prompts you to renew authentication.', 'status-valid'],
+          reauth_required: ['✕ The saved sign-in has expired or was revoked. Sign in again below.', 'status-reauth'],
+          temporarily_unavailable: ['⚠ The saved sign-in could not be checked because Flame Connect is temporarily unavailable. This does not necessarily mean the token is invalid.', 'status-temp'],
+          not_configured: ['No Flame Connect sign-in is currently saved.', 'status-neutral'],
         };
-        status.textContent = messages[result.status] || messages.temporarily_unavailable;
+        const [text, className] = messages[result.status] || messages.temporarily_unavailable;
+        setStatus(text, className);
       } catch {
         if (sequence === validationSequence) {
-          status.textContent = 'The saved sign-in could not be checked. This does not necessarily mean the token is invalid.';
+          setStatus('⚠ The saved sign-in could not be checked. This does not necessarily mean the token is invalid.', 'status-temp');
+        }
+      } finally {
+        validationActive = false;
+        if (validationQueued) {
+          validationQueued = false;
+          void updateStatus();
         }
       }
     };
@@ -118,7 +140,7 @@
         emailInput.value = '';
       } catch (error) {
         homebridge.toast.error(error.error?.message || error.message, error.message || 'Sign-in failed');
-        status.textContent = 'Sign-in failed. Check the credentials and try again, or use the browser fallback.';
+        setStatus('✕ Sign-in failed. Check the credentials and try again, or use the browser fallback.', 'status-reauth');
       } finally {
         // Remove credentials from the page as soon as the request completes.
         passwordInput.value = '';
@@ -136,7 +158,7 @@
         openLink.style.display = 'inline';
         complete.disabled = !redirect.value.trim();
         if (popup) popup.location = response.authorizationUrl;
-        status.textContent = 'Sign-in started. Paste the complete returned address below.';
+        setStatus('Sign-in started. Paste the complete returned address below.', 'status-neutral');
       } catch (error) {
         popup?.close();
         homebridge.toast.error(error.error?.message || error.message, 'Could not start sign-in');
@@ -160,7 +182,7 @@
       } catch (error) {
         sessionId = '';
         homebridge.toast.error(error.error?.message || error.message, error.message || 'Sign-in failed');
-        status.textContent = 'Sign-in failed. Start a new sign-in session and try again.';
+        setStatus('✕ Sign-in failed. Start a new sign-in session and try again.', 'status-reauth');
       } finally {
         homebridge.hideSpinner();
       }

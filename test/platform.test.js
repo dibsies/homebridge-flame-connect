@@ -2,24 +2,79 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { FlameConnectPlatform, mapWithConcurrency } from '../src/platform.js';
 
-test('cached accessories wait for current capabilities before services are constructed', () => {
+test('restored accessories get handlers immediately from cached context', () => {
+  const characteristic = (name, values = {}) => ({ ...values, toString: () => name });
+  const Service = {
+    Switch: { UUID: 'switch' }, Lightbulb: { UUID: 'light' }, Thermostat: { UUID: 'thermostat' },
+    Fanv2: { UUID: 'fan' }, AccessoryInformation: { UUID: 'info' },
+  };
+  const Characteristic = {
+    Name: characteristic('Name'), ConfiguredName: characteristic('ConfiguredName'),
+    Manufacturer: characteristic('Manufacturer'), Model: characteristic('Model'),
+    SerialNumber: characteristic('SerialNumber'),
+    On: characteristic('On'), Brightness: characteristic('Brightness'),
+    Hue: characteristic('Hue'), Saturation: characteristic('Saturation'),
+    Active: characteristic('Active', { INACTIVE: 0, ACTIVE: 1 }),
+    RotationSpeed: characteristic('RotationSpeed'),
+    TargetHeatingCoolingState: characteristic('TargetHeatingCoolingState', { OFF: 0, HEAT: 1 }),
+    CurrentHeatingCoolingState: characteristic('CurrentHeatingCoolingState', { OFF: 0, HEAT: 1 }),
+    TargetTemperature: characteristic('TargetTemperature'),
+    CurrentTemperature: characteristic('CurrentTemperature'),
+    TemperatureDisplayUnits: characteristic('TemperatureDisplayUnits', { CELSIUS: 0 }),
+  };
   const callbacks = {};
   const api = {
-    hap: { Service: {}, Characteristic: {} },
+    hap: { Service, Characteristic },
     user: { storagePath: () => '/tmp' },
     on: (event, callback) => { callbacks[event] = callback; },
+    updatePlatformAccessories() {},
   };
-  const platform = new FlameConnectPlatform({}, {}, api);
+  const platform = new FlameConnectPlatform({ debug() {}, info() {}, warn() {}, error() {} }, {}, api);
   const accessory = {
     UUID: 'cached',
-    context: { fire: { fireId: 'fire', features: { powerBoost: false } } },
+    context: { fire: { fireId: 'fire', friendlyName: 'Fire', features: {} } },
+    services: [],
+    addService(type, name, subtype) {
+      const values = {};
+      const service = {
+        UUID: type.UUID, subtype, displayName: name, linkedServices: [],
+        getCharacteristic(k) {
+          return values[k] ||= {
+            value: '', props: {},
+            onGet(fn) { this.getter = fn; return this; },
+            onSet(fn) { this.setter = fn; return this; },
+            setProps(props) { this.props = props; return this; },
+          };
+        },
+        setCharacteristic(k, v) { this.getCharacteristic(k).value = v; return this; },
+        updateCharacteristic(k, v) { return this.setCharacteristic(k, v); },
+        addOptionalCharacteristic() {},
+        addLinkedService(s) { this.linkedServices.push(s); },
+      };
+      this.services.push(service);
+      return service;
+    },
+    getService(type, name, subtype) {
+      return this.services.find((s) => s.UUID === type.UUID && s.subtype === subtype)
+        || this.addService(type, name, subtype);
+    },
+    removeService(type, subtype) {
+      const service = this.services.find((s) => s.UUID === type.UUID && s.subtype === subtype);
+      this.services = this.services.filter((s) => s !== service);
+    },
   };
 
   platform.configureAccessory(accessory);
 
+  // The handler attaches at startup from cached context, so existing controls
+  // keep working through a cloud outage; capabilities reconcile on discovery.
   assert.equal(platform.accessories.get('cached'), accessory);
-  assert.equal(platform.handlers.size, 0);
+  assert.equal(platform.handlers.size, 1);
+  const handler = platform.handlers.get('cached');
+  assert.ok(handler.powerService);
+  assert.ok(handler.flameService);
   assert.equal(typeof callbacks.didFinishLaunching, 'function');
+  handler.dispose();
 });
 
 function mockPlatform(config = {}) {
@@ -67,7 +122,7 @@ test('discovery retry backoff grows exponentially and is bounded', () => {
 
 test('successful discovery clears retry state and starts polling', async () => {
   const { platform } = mockPlatform({ refreshToken: 'rt' });
-  platform.client.getFires = async () => [];
+  platform.client.getFires = async () => ({ fires: [], malformed: false });
   platform.discoveryAttempts = 3;
   try {
     await platform.discoverDevices();
@@ -148,5 +203,170 @@ test('background polling defaults to fifteen minutes and does not overlap', asyn
     await Promise.all([first, second]);
   } finally {
     clearInterval(platform.pollTimer);
+  }
+});
+
+test('config sanitization clamps out-of-range values to safe bounds', () => {
+  const api = {
+    hap: { Service: {}, Characteristic: {} },
+    user: { storagePath: () => '/tmp' },
+    on() {},
+    updatePlatformAccessories() {},
+  };
+  const platform = new FlameConnectPlatform(
+    { debug() {}, info() {}, warn() {}, error() {} },
+    {
+      name: '   ',
+      pollIntervalMinutes: 0.5,
+      cacheSeconds: 99999,
+      commandStateMaxAgeSeconds: -5,
+      turboBoostMinutes: 60,
+      tokenFile: '   ',
+      exposePower: false,
+    },
+    api,
+  );
+  assert.ok(!('name' in platform.config));
+  assert.equal(platform.config.pollIntervalMinutes, 5);
+  assert.equal(platform.config.cacheSeconds, 3600);
+  assert.equal(platform.config.commandStateMaxAgeSeconds, 0);
+  assert.equal(platform.config.turboBoostMinutes, 20);
+  assert.ok(!('tokenFile' in platform.config));
+});
+
+test('non-numeric config values fall back to safe defaults', () => {
+  const api = {
+    hap: { Service: {}, Characteristic: {} },
+    user: { storagePath: () => '/tmp' },
+    on() {},
+    updatePlatformAccessories() {},
+  };
+  const platform = new FlameConnectPlatform(
+    { debug() {}, info() {}, warn() {}, error() {} },
+    { pollIntervalMinutes: 'often', cacheSeconds: NaN },
+    api,
+  );
+  assert.equal(platform.config.pollIntervalMinutes, 15);
+  assert.equal(platform.config.cacheSeconds, 30);
+});
+
+test('allControlsDisabled requires every control explicitly off', () => {
+  const api = {
+    hap: { Service: {}, Characteristic: {} },
+    user: { storagePath: () => '/tmp' },
+    on() {},
+    updatePlatformAccessories() {},
+  };
+  const make = (config) => new FlameConnectPlatform(
+    { debug() {}, info() {}, warn() {}, error() {} }, config, api,
+  );
+  const allOff = {
+    exposePower: false, exposeFlames: false, exposeHeater: false, exposeEcoMode: false,
+    exposeFanOnly: false, exposeTurboBoost: false, exposeFlameSpeed: false,
+    exposeMediaLight: false, exposeOverheadLight: false, exposeLogs: false,
+  };
+  assert.equal(make(allOff).allControlsDisabled(), true);
+  assert.equal(make({ ...allOff, advancedControls: true }).allControlsDisabled(), false);
+  // One control left at its default (undefined) is not "explicitly disabled".
+  const { exposeLogs, ...rest } = allOff;
+  assert.equal(make(rest).allControlsDisabled(), false);
+  assert.equal(make({}).allControlsDisabled(), false);
+});
+
+test('a partially malformed device list does not unregister accessories missing from it', async () => {
+  const characteristic = (name, values = {}) => ({ ...values, toString: () => name });
+  const Service = {
+    Switch: { UUID: 'switch' }, Lightbulb: { UUID: 'light' }, Thermostat: { UUID: 'thermostat' },
+    Fanv2: { UUID: 'fan' }, AccessoryInformation: { UUID: 'info' },
+  };
+  const Characteristic = {
+    Name: characteristic('Name'), ConfiguredName: characteristic('ConfiguredName'),
+    Manufacturer: characteristic('Manufacturer'), Model: characteristic('Model'),
+    SerialNumber: characteristic('SerialNumber'),
+    On: characteristic('On'), Brightness: characteristic('Brightness'),
+    Hue: characteristic('Hue'), Saturation: characteristic('Saturation'),
+    Active: characteristic('Active', { INACTIVE: 0, ACTIVE: 1 }),
+    RotationSpeed: characteristic('RotationSpeed'),
+    TargetHeatingCoolingState: characteristic('TargetHeatingCoolingState', { OFF: 0, HEAT: 1 }),
+    CurrentHeatingCoolingState: characteristic('CurrentHeatingCoolingState', { OFF: 0, HEAT: 1 }),
+    TargetTemperature: characteristic('TargetTemperature'),
+    CurrentTemperature: characteristic('CurrentTemperature'),
+    TemperatureDisplayUnits: characteristic('TemperatureDisplayUnits', { CELSIUS: 0 }),
+  };
+  const makeAccessory = (uuid, name) => ({
+    UUID: uuid,
+    displayName: name,
+    context: {},
+    services: [],
+    addService(type, serviceName, subtype) {
+      const values = {};
+      const service = {
+        UUID: type.UUID, subtype, displayName: serviceName, linkedServices: [],
+        getCharacteristic(k) {
+          return values[k] ||= {
+            value: '', props: {},
+            onGet(fn) { this.getter = fn; return this; },
+            onSet(fn) { this.setter = fn; return this; },
+            setProps(props) { this.props = props; return this; },
+          };
+        },
+        setCharacteristic(k, v) { this.getCharacteristic(k).value = v; return this; },
+        updateCharacteristic(k, v) { return this.setCharacteristic(k, v); },
+        addOptionalCharacteristic() {},
+        addLinkedService(s) { this.linkedServices.push(s); },
+      };
+      this.services.push(service);
+      return service;
+    },
+    getService(type, serviceName, subtype) {
+      return this.services.find((s) => s.UUID === type.UUID && s.subtype === subtype)
+        || this.addService(type, serviceName, subtype);
+    },
+    removeService(service) {
+      this.services = this.services.filter((s) => s !== service);
+    },
+  });
+  const messages = [];
+  const registered = [];
+  const unregistered = [];
+  const api = {
+    hap: { Service, Characteristic, uuid: { generate: (s) => s } },
+    user: { storagePath: () => '/tmp' },
+    on: () => {},
+    platformAccessory: function (name, uuid) { return makeAccessory(uuid, name); },
+    registerPlatformAccessories: (...args) => registered.push(args),
+    unregisterPlatformAccessories: (...args) => unregistered.push(args),
+    updatePlatformAccessories() {},
+  };
+  const log = {
+    info: (m) => messages.push(['info', m]),
+    warn: (m) => messages.push(['warn', m]),
+    error: (m) => messages.push(['error', m]),
+    debug: (m) => messages.push(['debug', m]),
+  };
+  const platform = new FlameConnectPlatform(log, {}, api);
+  // Fire B is restored from the Homebridge cache before discovery runs.
+  const cachedB = makeAccessory('uuid-b', 'Fire B');
+  cachedB.context.fire = { fireId: 'b', friendlyName: 'Fire B', features: {} };
+  platform.configureAccessory(cachedB);
+  // Discovery returns only fire A plus a record without an identifier: the
+  // list is not authoritative, so B must survive even though it is absent.
+  platform.client.getFires = async () => ({
+    fires: [{ fireId: 'a', friendlyName: 'Fire A', features: {} }],
+    malformed: true,
+  });
+  platform.client.getFireOverview = async () => ({ parameters: {} });
+  try {
+    await platform.discoverDevices();
+    assert.ok(platform.accessories.get('uuid-b'), 'cached accessory must be preserved');
+    assert.ok(platform.handlers.get('uuid-b'), 'cached handler must not be disposed');
+    assert.ok(platform.accessories.get('flameconnect:a'), 'valid discovered fire is still added');
+    assert.deepEqual(unregistered, [], 'nothing may be unregistered from a malformed list');
+    assert.ok(messages.some(([level, m]) => level === 'warn' && /invalid records/.test(m)));
+  } finally {
+    platform.clearDiscoveryRetry();
+    if (platform.pollTimer) clearInterval(platform.pollTimer);
+    platform.pollTimer = null;
+    for (const handler of platform.handlers.values()) handler.dispose();
   }
 });

@@ -102,7 +102,17 @@ export class FlameConnectClient {
     if (!response.ok) {
       if (response.status === 401 && !retried) {
         await this.auth.getAccessToken(true);
-        return this.request(method, route, body, true);
+        if (method === 'GET') {
+          return this.request(method, route, body, true);
+        }
+        // A 401 means the write was rejected before execution, so refreshing
+        // the token is safe — but the write itself must not be silently
+        // replayed here. The caller retries the whole command once, which
+        // re-reads state first and therefore cannot duplicate the command.
+        throw new FlameConnectCloudError(
+          `Flame Connect authentication was refreshed; the ${method} ${route} write was not submitted.`,
+          { code: 'FLAMECONNECT_WRITE_AUTH_REFRESHED', kind: 'communication' },
+        );
       }
       const retryAfterMs = retryAfterMilliseconds(response);
       if (method === 'GET' && !retried && [429, 503].includes(response.status)
@@ -127,7 +137,36 @@ export class FlameConnectClient {
 
   async getFires() {
     const data = await this.request('GET', '/api/Fires/GetFires');
-    return Array.isArray(data) ? data.map((entry) => parseFire(entry)) : [];
+    // A malformed device list must fail discovery, not empty it: an empty
+    // list unregisters every cached accessory.
+    if (!Array.isArray(data)) {
+      throw new FlameConnectCloudError(
+        'Flame Connect returned an unexpected device list; leaving registered accessories unchanged.',
+      );
+    }
+    const seen = new Set();
+    const fires = [];
+    // A list containing records without identifiers is only partially
+    // trustworthy: an accessory missing from it may simply have been dropped
+    // from the malformed response, so callers must not treat the list as
+    // authoritative for unregistration. Duplicates are not malformed — the
+    // device is still authoritatively present.
+    let malformed = false;
+    for (const entry of data) {
+      const fire = parseFire(entry);
+      if (!fire.fireId) {
+        malformed = true;
+        this.log?.warn?.('Flame Connect returned a device record without an identifier; ignoring it.');
+        continue;
+      }
+      if (seen.has(fire.fireId)) {
+        this.log?.warn?.('Flame Connect returned a duplicate device record; ignoring the duplicate.');
+        continue;
+      }
+      seen.add(fire.fireId);
+      fires.push(fire);
+    }
+    return { fires, malformed };
   }
 
   async getFireOverview(fireId, retried = false) {
@@ -153,15 +192,17 @@ export class FlameConnectClient {
     const featureData = data?.FireDetails?.FireFeature || wifi.FireFeature || {};
     const fire = parseFire(wifi, parseFeatures(featureData));
     const parameters = {};
+    const decodeErrors = [];
     for (const entry of wifi.Parameters || []) {
       try {
         const decoded = decodeParameter(entry.ParameterId, entry.Value);
         parameters[decoded.type] = decoded;
       } catch (error) {
+        decodeErrors.push(entry.ParameterId);
         this.log?.debug?.(`Could not decode Flame Connect parameter ${entry.ParameterId}: ${error.message}`);
       }
     }
-    return { fire, parameters };
+    return { fire, parameters, decodeErrors };
   }
 
   async writeParameters(fireId, entries) {
@@ -174,7 +215,13 @@ export class FlameConnectClient {
       Parameters: parameters,
     });
     if (result?.ResultCode !== undefined && Number(result.ResultCode) !== 0) {
-      throw new Error(`Flame Connect rejected the command (result code ${result.ResultCode}).`);
+      // A rejected write keeps its result code for diagnostics and becomes a
+      // classified cloud error — never a generic "plugin threw an error".
+      // Callers must not apply optimistic state updates for rejected writes.
+      throw new FlameConnectCloudError(
+        `Flame Connect rejected the command (result code ${result.ResultCode}).`,
+        { kind: 'rejected', resultCode: Number(result.ResultCode) },
+      );
     }
   }
 

@@ -1,8 +1,8 @@
 export class FlameConnectCloudError extends Error {
-  constructor(message, { cause, kind = 'communication', resultCode, retryAfterMs } = {}) {
+  constructor(message, { cause, kind = 'communication', code, resultCode, retryAfterMs } = {}) {
     super(message, cause === undefined ? undefined : { cause });
     this.name = 'FlameConnectCloudError';
-    this.code = 'FLAMECONNECT_CLOUD_ERROR';
+    this.code = code || 'FLAMECONNECT_CLOUD_ERROR';
     this.kind = kind;
     if (resultCode !== undefined) this.resultCode = resultCode;
     if (retryAfterMs !== undefined) this.retryAfterMs = retryAfterMs;
@@ -19,7 +19,8 @@ export function isTimeoutError(error) {
 
 export function isCloudError(error) {
   return error?.code === 'FLAMECONNECT_CLOUD_ERROR'
-    || error?.code === 'FLAMECONNECT_REAUTH_REQUIRED';
+    || error?.code === 'FLAMECONNECT_REAUTH_REQUIRED'
+    || error?.code === 'FLAMECONNECT_WRITE_AUTH_REFRESHED';
 }
 
 export function asCloudError(error, message) {
