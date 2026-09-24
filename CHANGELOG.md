@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.0-rc.2
+
+- Fail a refresh when an overview omits any previously confirmed parameter, whether the response is empty or partial: known-good state, the HomeKit accessory layout, and freshness are preserved, so a single anomalous overview can never remove a control. Writes fail closed while the cloud-failure cooldown is active and re-read the overview after recovery instead of trusting a rejected snapshot.
+- Fail closed on partially malformed device lists: previously discovered accessories are kept rather than unregistered when a later discovery response is malformed.
+- Adopt and retry a cross-process rotated token when a refresh fails with `invalid_grant`, instead of demanding re-authentication; the failed-refresh path never writes the token file, eliminating the token lost-update race.
+- Return a HomeKit communication error for cold-start reads with no confirmed state instead of reporting "off"; cancel queued commands that expire before starting so they never execute late, while already-started writes finish and reconcile without replay.
+- Assign the primary HomeKit service through HAP's `setPrimaryService`, guarded against repeated configuration-change events.
+- Expand automated coverage for incomplete overviews, malformed discovery, token rotation races, deadline handling, and primary-service assignment; 106 tests pass.
+
 ## 1.0.0-rc.1
 
 - Reuse recently confirmed fireplace state inside the serialized command queue, reducing most commands from two cloud round trips to one while retaining a configurable conservative mode.

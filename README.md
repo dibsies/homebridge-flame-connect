@@ -133,8 +133,8 @@ For a release-candidate test package, download the generated `.tgz` on the Homeb
 
 ```bash
 cd /tmp
-wget https://github.com/dibsies/homebridge-flame-connect/releases/download/v1.0.0-rc.1/homebridge-flame-connect-1.0.0-rc.1.tgz
-/opt/homebridge/bin/npm install --prefix /var/lib/homebridge /tmp/homebridge-flame-connect-1.0.0-rc.1.tgz
+wget https://github.com/dibsies/homebridge-flame-connect/releases/download/v1.0.0-rc.2/homebridge-flame-connect-1.0.0-rc.2.tgz
+/opt/homebridge/bin/npm install --prefix /var/lib/homebridge /tmp/homebridge-flame-connect-1.0.0-rc.2.tgz
 ```
 
 Do not use `npm install -g` for this Homebridge image: that puts the plugin under `/opt/homebridge/lib/node_modules`, while the service and its locally installed plugins live under `/var/lib/homebridge/node_modules`. Restart Homebridge after installation.
