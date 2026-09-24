@@ -236,7 +236,7 @@ test('services reconcile when capabilities change', async () => {
   assert.ok(f.handler.ecoService);
 });
 
-test('flame-parameter controls are removed once a refresh proves the parameter absent', async () => {
+test('a first overview without the flame parameter builds the layout without flame controls', async () => {
   const f = fixture();
   assert.ok(f.handler.speedService);
   assert.ok(f.handler.mediaService);
@@ -268,30 +268,66 @@ test('only one accessory is marked primary', () => {
   assert.equal(primaries[0].subtype, 'power');
 });
 
-test('a parameter that disappears on a later refresh is dropped, not retained as current', async () => {
+test('an incomplete overview after a valid one fails the refresh and preserves known state', async () => {
   const f = fixture();
   await f.handler.refresh();
   assert.ok(f.handler.state.flame, 'flame parameter present after the first overview');
-  const originalFlame = structuredClone(f.remote().flame);
-  // The cloud stops reporting the flame parameter on the next overview.
+  const lastRefresh = f.handler.lastRefresh;
+  assert.ok(lastRefresh > 0, 'the valid overview was marked fresh');
+  // The cloud stops reporting the flame parameter on the next overview. That
+  // is an anomalous response, not a confirmed loss of support: the refresh
+  // fails instead of dropping known-good state.
   const reduced = structuredClone(f.remote());
   delete reduced.flame;
   f.client.getFireOverview = async () => ({ parameters: structuredClone(reduced) });
-  await f.handler.refresh();
-  assert.equal(f.handler.state.flame, undefined, 'a disappeared parameter must be dropped, not retained as current');
-  // A write built on the dropped parameter fails loudly instead of sending a
-  // stale value to the cloud.
-  await assert.rejects(f.handler.setFlames(true), /did not report/);
-  // Flame-derived controls are removed; the core flames control stays.
-  assert.equal(f.handler.speedService, undefined);
-  assert.equal(f.handler.mediaService, undefined);
-  assert.equal(f.handler.overheadService, undefined);
+  await assert.rejects(f.handler.refresh(), /incomplete overview/);
+  assert.ok(f.handler.state.flame, 'known-good state is preserved, not dropped');
+  assert.equal(f.handler.lastRefresh, lastRefresh, 'an anomalous response is not marked fresh');
+  // The accessory layout survives: no HomeKit controls are ripped out.
+  assert.ok(f.handler.speedService);
+  assert.ok(f.handler.mediaService);
+  assert.ok(f.handler.overheadService);
   assert.ok(f.handler.flameService);
-  // The parameter coming back restores normal behavior.
-  f.remote().flame = originalFlame;
-  f.client.getFireOverview = async () => ({ parameters: structuredClone(f.remote()) });
+});
+
+test('an empty overview after a valid one fails the refresh and preserves the layout', async () => {
+  const f = fixture();
   await f.handler.refresh();
-  assert.ok(f.handler.state.flame, 'a restored parameter is current again');
+  const lastRefresh = f.handler.lastRefresh;
+  f.client.getFireOverview = async () => ({ parameters: {} });
+  await assert.rejects(f.handler.refresh(), /incomplete overview/);
+  assert.ok(f.handler.state.flame, 'last known values are kept');
+  assert.equal(f.handler.lastRefresh, lastRefresh, 'the empty response is not marked fresh');
+  assert.ok(f.handler.flameService);
+  assert.ok(f.handler.speedService);
+  // The cloud recovers on the next poll: a full overview is accepted again.
+  f.client.getFireOverview = async () => ({ parameters: structuredClone(f.remote()) });
+  const before = Date.now();
+  await f.handler.refresh();
+  assert.ok(f.handler.lastRefresh >= before, 'a good overview marks fresh again');
+});
+
+test('a write after an incomplete overview fails closed, then re-reads once the cloud recovers', async () => {
+  const f = fixture({ commandStateMaxAgeSeconds: 0 });
+  await f.handler.refresh();
+  const reduced = structuredClone(f.remote());
+  delete reduced.flame;
+  f.client.getFireOverview = async () => ({ parameters: structuredClone(reduced) });
+  await assert.rejects(f.handler.refresh(), /incomplete overview/);
+  // While the failure cooldown is active the write fails with the stored
+  // refresh error instead of building a command from the unconfirmed
+  // snapshot.
+  await assert.rejects(f.handler.setFlames(true), /incomplete overview/);
+  // The cloud recovers. Past the cooldown, the write re-reads the overview
+  // (no freshness window), so the command is built from confirmed state —
+  // never from the snapshot the failed refresh refused to trust.
+  let reads = 0;
+  f.client.getFireOverview = async () => { reads += 1; return { parameters: structuredClone(f.remote()) }; };
+  f.handler.cloudFailureUntil = 0;
+  f.handler.lastCloudError = null;
+  await f.handler.setFlames(true);
+  assert.ok(reads > 0, 'the write re-read the overview before sending');
+  assert.equal(f.remote().flame.flameEffect, 1, 'the command used freshly confirmed state');
 });
 
 test('a cold-start read timeout returns a communication error instead of reporting off', { timeout: 30000 }, async () => {

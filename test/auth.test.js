@@ -224,18 +224,30 @@ test('a rejected refresh with no rotation clears state and surfaces re-auth', as
   }
 });
 
-test('an invalid_grant after a concurrent rotation never overwrites the newer token', async () => {
+test('a token rotated while handling invalid_grant is retried instead of demanding sign-in', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'flame-auth-'));
   const original = globalThis.fetch;
-  // Every refresh attempt is rejected: the saved token is revoked.
-  globalThis.fetch = async () => ({ ok: false, status: 400, text: async () => JSON.stringify({ error: 'invalid_grant' }) });
+  const attempts = [];
+  globalThis.fetch = async (_url, options) => {
+    const body = String(options.body);
+    // The request body is form-encoded; match the bare token, not the field.
+    const which = body.includes('dead-token') ? 'dead-token' : 'fresh-token';
+    attempts.push(which);
+    if (which === 'dead-token') {
+      return { ok: false, status: 400, text: async () => JSON.stringify({ error: 'invalid_grant' }) };
+    }
+    return {
+      ok: true, status: 200,
+      text: async () => JSON.stringify({ access_token: 'fresh-access', refresh_token: 'fresh-token-r2', expires_in: 3600 }),
+    };
+  };
   try {
     const tokenFile = path.join(dir, 'tokens.json');
     const auth = new FlameConnectAuth({ tokenFile, log: { debug() {}, info() {}, warn() {}, error() {} } });
     auth.state.refreshToken = 'dead-token';
     await writeFile(tokenFile, JSON.stringify({ refreshToken: 'dead-token' }));
-    // Another process rotates the token file between this instance's stored-
-    // token check and its failure-handling save.
+    // Another process rotates the token file after this instance's first
+    // stored-token check but before the failure handling finishes.
     let reads = 0;
     const readStored = auth.readStoredRefreshToken.bind(auth);
     auth.readStoredRefreshToken = async () => {
@@ -245,10 +257,52 @@ test('an invalid_grant after a concurrent rotation never overwrites the newer to
       }
       return readStored();
     };
+    const token = await auth.performRefresh();
+    assert.equal(token, 'fresh-access', 'the newly discovered token is retried, not treated as re-auth');
+    assert.deepEqual(attempts, ['dead-token', 'fresh-token']);
+    assert.equal(auth.state.refreshToken, 'fresh-token-r2');
+  } finally {
+    globalThis.fetch = original;
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('a failed refresh never writes the token file, so it cannot overwrite a newer token', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'flame-auth-'));
+  const original = globalThis.fetch;
+  const attempts = [];
+  // Every refresh attempt is rejected: both the original and the rotated
+  // token are revoked.
+  globalThis.fetch = async (_url, options) => {
+    attempts.push(String(options.body).includes('dead-token') ? 'dead-token' : 'good-token');
+    return { ok: false, status: 400, text: async () => JSON.stringify({ error: 'invalid_grant' }) };
+  };
+  try {
+    const tokenFile = path.join(dir, 'tokens.json');
+    const auth = new FlameConnectAuth({ tokenFile, log: { debug() {}, info() {}, warn() {}, error() {} } });
+    auth.state.refreshToken = 'dead-token';
+    await writeFile(tokenFile, JSON.stringify({ refreshToken: 'dead-token' }));
+    let saves = 0;
+    const save = auth.save.bind(auth);
+    auth.save = async (...args) => { saves += 1; return save(...args); };
+    // Another process rotates the token file while this instance handles the
+    // failure. The rotated token is adopted and tried...
+    let reads = 0;
+    const readStored = auth.readStoredRefreshToken.bind(auth);
+    auth.readStoredRefreshToken = async () => {
+      reads += 1;
+      if (reads === 2) {
+        await writeFile(tokenFile, JSON.stringify({ refreshToken: 'good-token' }));
+      }
+      return readStored();
+    };
+    // ...but the retry is also rejected, so re-auth is genuinely required.
     await assert.rejects(auth.performRefresh(), (error) => error.code === 'FLAMECONNECT_REAUTH_REQUIRED');
+    assert.deepEqual(attempts, ['dead-token', 'good-token'], 'the adopted token was actually tried');
+    assert.equal(saves, 0, 'a failed refresh must never write the token file');
     const stored = JSON.parse(await readFile(tokenFile, 'utf8'));
-    assert.equal(stored.refreshToken, 'fresh-token', 'the newer rotated token must not be clobbered');
-    assert.equal(auth.state.refreshToken, 'fresh-token', 'the instance adopts the rotated token');
+    assert.equal(stored.refreshToken, 'good-token', 'the newer rotated token survives the failed refresh');
+    assert.equal(auth.state.refreshToken, '', 'in-memory credentials are cleared');
   } finally {
     globalThis.fetch = original;
     await rm(dir, { recursive: true, force: true });

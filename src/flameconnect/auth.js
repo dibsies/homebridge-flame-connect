@@ -271,36 +271,46 @@ export class FlameConnectAuth {
     return this.refreshPromise;
   }
 
+  // Adopt the stored refresh token when another process rotated it after this
+  // instance loaded its own copy. `failedToken` is the token that just failed,
+  // so a token is only adopted when the file actually holds something newer.
+  // Returns true when a newer token was adopted.
+  async adoptNewerToken(failedToken) {
+    const stored = await this.readStoredRefreshToken();
+    if (stored && stored !== failedToken) {
+      this.log?.debug?.('Flame Connect refresh token was rotated by another process; retrying with the stored token.');
+      this.state.refreshToken = stored;
+      return true;
+    }
+    return false;
+  }
+
   async performRefresh() {
     let data;
     try {
       data = await exchangeRefreshToken(this.state.refreshToken);
     } catch (error) {
       if (error?.code === 'FLAMECONNECT_REAUTH_REQUIRED') {
-        // Another process (for example the settings-page validator) may have
-        // rotated the refresh token after this instance loaded it. The token
-        // file is the coordination point: if it now holds a different refresh
-        // token, retry once with that one before asking the user to sign in.
-        const stored = await this.readStoredRefreshToken();
-        if (stored && stored !== this.state.refreshToken) {
-          this.log?.debug?.('Flame Connect refresh token was rotated by another process; retrying with the stored token.');
-          this.state.refreshToken = stored;
-          return this.performRefresh();
-        }
-        // No newer token exists. Clear in-memory credentials, but only clear
-        // the file if it still holds the token we just proved invalid: the
-        // other process may have rotated between our check and this save, and
-        // overwriting that newer token would be a lost update.
+        // The token file is the cross-process coordination point. Another
+        // process (for example the settings-page validator) can rotate the
+        // refresh token at any moment: before the failed exchange, or while
+        // this failure is being handled. If the file holds a token other than
+        // the one that just failed, adopt it and retry instead of demanding
+        // sign-in.
+        const failedToken = this.state.refreshToken;
+        if (await this.adoptNewerToken(failedToken)) return this.performRefresh();
+        // No newer token exists: the saved token is genuinely revoked. Clear
+        // in-memory credentials only. The file is deliberately never written
+        // on this path: a failed refresh must never overwrite a token another
+        // process saved, not even in the instant between the last check above
+        // and a save.
         this.state.accessToken = '';
         this.state.expiresAt = 0;
-        const latest = await this.readStoredRefreshToken();
-        if (!this.tokenFile || !latest || latest === this.state.refreshToken) {
-          this.state.refreshToken = '';
-          await this.save();
-        } else {
-          this.state.refreshToken = latest;
-          this.log?.debug?.('Flame Connect token file was rotated during sign-in failure handling; keeping the newer token.');
-        }
+        this.state.refreshToken = '';
+        // One final check: a rotation may have landed while handling the
+        // failure above. A newly discovered token is retried, never treated
+        // as a demand to sign in.
+        if (await this.adoptNewerToken(failedToken)) return this.performRefresh();
       }
       throw error;
     }

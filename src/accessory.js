@@ -734,18 +734,27 @@ export class FlameConnectAccessory {
           return this.state;
         }
         const merged = { ...this.state, ...overview.parameters };
-        // A parameter confirmed by an earlier overview but absent from this
-        // one is stale, not current: drop it instead of retaining old values
-        // as if they were freshly confirmed. A dropped parameter fails writes
-        // (the client refuses a null base) and stops being reported as
-        // current state. Parameters that failed to decode stay confirmed —
-        // their last-good values are retained with a warning below.
+        // The set of parameters this overview actually confirms. Parameters
+        // that failed to decode stay confirmed — their last-good values are
+        // retained with a warning below.
         const confirmed = new Set([
           ...Object.keys(overview.parameters || {}),
           ...(overview.decodeErrors || []).map((id) => parameterTypeForId(id)),
         ]);
-        for (const key of this.confirmedParameters) {
-          if (!confirmed.has(key)) delete merged[key];
+        // A parameter confirmed by an earlier overview but absent from this
+        // one makes the whole response anomalous, not a confirmed loss of
+        // support: fail the refresh instead of treating stale values as
+        // current or ripping out HomeKit controls on a transient cloud
+        // glitch. State, services and lastRefresh are left untouched, so the
+        // next read retries the GET and the accessory layout survives. A
+        // control is only ever removed when its loss of support is reliably
+        // confirmed — a single overview can never confirm that. (Capability
+        // changes reported by discovery metadata remain the removal path.)
+        const vanished = [...this.confirmedParameters].filter((key) => !confirmed.has(key));
+        if (vanished.length > 0) {
+          throw new FlameConnectCloudError(
+            `Flame Connect returned an incomplete overview (missing parameters: ${vanished.join(', ')}); keeping last known state.`,
+          );
         }
         this.confirmedParameters = confirmed;
         const decodeErrors = overview.decodeErrors || [];
