@@ -1,0 +1,227 @@
+<style>
+  .flame-auth { margin-bottom: 1rem; }
+  .flame-auth .steps { margin: .75rem 0; padding-left: 1.25rem; }
+  .flame-auth textarea { min-height: 6rem; }
+  .flame-auth .status { margin-top: .75rem; font-weight: 600; padding: .6rem; border-radius: .3rem; }
+  .flame-auth .status-valid { color: #145c2e; background: #e7f5ea; }
+  .flame-auth .status-reauth { color: #a11b2b; background: #fde9eb; }
+  .flame-auth .status-temp { color: #9a6b1a; }
+  .flame-auth .status-neutral { color: inherit; font-weight: 400; }
+  .flame-auth .open-link { display: none; margin-left: .5rem; }
+  @media (prefers-color-scheme: dark) {
+    .flame-auth .status-valid { color: #a9edbd; background: #173d27; }
+    .flame-auth .status-reauth { color: #ffb3bd; background: #48202a; }
+  }
+</style>
+
+<div class="card card-body flame-auth">
+  <h5>Flame Connect Sign-in</h5>
+  <p>Sign in once through Flame Connect. Your email and password are sent only to the Flame Connect Microsoft login and are never stored.</p>
+  <div class="form-group">
+    <label for="authEmail">Flame Connect email</label>
+    <input id="authEmail" type="email" class="form-control" autocomplete="username">
+  </div>
+  <div class="form-group">
+    <label for="authPassword">Flame Connect password</label>
+    <input id="authPassword" type="password" class="form-control" autocomplete="current-password">
+  </div>
+  <button id="credentialAuth" type="button" class="btn btn-primary">Sign in and connect</button>
+  <button id="manualAuth" type="button" class="btn btn-outline-secondary">Apply manual token from settings</button>
+  <hr>
+  <details>
+  <summary>Browser sign-in fallback</summary>
+  <ol class="steps">
+    <li>Select <strong>Start sign-in</strong> and complete the Flame Connect login.</li>
+    <li>When the browser reaches an <code>msal…://auth</code> address, copy the complete address.</li>
+    <li>Paste it below and select <strong>Complete sign-in</strong>.</li>
+  </ol>
+  <div>
+    <button id="startAuth" type="button" class="btn btn-primary">Start sign-in</button>
+    <a id="openAuth" class="open-link" target="_blank" rel="noopener">Open sign-in page</a>
+  </div>
+  <div class="form-group mt-3">
+    <label for="redirectUrl">Returned address</label>
+    <textarea id="redirectUrl" class="form-control" autocomplete="off"
+      placeholder="msal…://auth?code=…&amp;state=…"></textarea>
+  </div>
+  <button id="completeAuth" type="button" class="btn btn-success" disabled>Complete sign-in</button>
+  </details>
+  <div id="authStatus" class="status text-muted">Checking current configuration…</div>
+</div>
+
+<script>
+  (async () => {
+    let pluginConfig = await homebridge.getPluginConfig();
+    if (!pluginConfig.length) pluginConfig.push({ platform: 'FlameConnect', name: 'Flame Connect' });
+    let sessionId = '';
+    const status = document.querySelector('#authStatus');
+    const redirect = document.querySelector('#redirectUrl');
+    const complete = document.querySelector('#completeAuth');
+    const openLink = document.querySelector('#openAuth');
+
+    const saveRefreshToken = async (refreshToken) => {
+      pluginConfig[0].platform = 'FlameConnect';
+      pluginConfig[0].name ||= 'Flame Connect';
+      pluginConfig[0].refreshToken = refreshToken;
+      pluginConfig = await homebridge.updatePluginConfig(pluginConfig);
+      setStatus('✓ Sign-in verified and saved. Select Save to keep these settings, then restart Homebridge to use the new sign-in.', 'status-valid');
+      homebridge.toast.success('The new sign-in is saved. Restart Homebridge after saving settings.', 'Flame Connect connected');
+    };
+
+    let validationSequence = 0;
+    let validationTimer;
+    let validationActive = false;
+    let validationQueued = false;
+    let signingIn = false;
+    const setStatus = (text, className) => {
+      status.textContent = text;
+      status.className = `status ${className}`;
+    };
+    const updateStatus = async () => {
+      if (signingIn) return;
+      // Rate-limit: never run two validations concurrently; a change that
+      // arrives mid-validation re-runs once afterwards instead of piling up.
+      if (validationActive) {
+        validationQueued = true;
+        return;
+      }
+      validationActive = true;
+      const sequence = ++validationSequence;
+      try {
+        // Always validate: a default token file may exist even when both
+        // visible config fields are blank.
+        setStatus('… Checking the saved Flame Connect sign-in…', 'status-neutral');
+        const result = await homebridge.request('/auth/validate', {
+          refreshToken: pluginConfig[0]?.refreshToken || '',
+          tokenFile: pluginConfig[0]?.tokenFile || '',
+        });
+        if (sequence !== validationSequence) return;
+        const messages = {
+          valid: ['✓ Flame Connect is signed in and the saved token is valid. You only need to sign in again if the plugin prompts you to renew authentication.', 'status-valid'],
+          reauth_required: ['✕ The saved sign-in has expired or was revoked. Sign in again below.', 'status-reauth'],
+          temporarily_unavailable: ['⚠ The saved sign-in could not be checked because Flame Connect is temporarily unavailable. This does not necessarily mean the token is invalid.', 'status-temp'],
+          not_configured: ['No Flame Connect sign-in is currently saved.', 'status-neutral'],
+        };
+        const [text, className] = messages[result.status] || messages.temporarily_unavailable;
+        setStatus(text, className);
+      } catch {
+        if (sequence === validationSequence) {
+          setStatus('⚠ The saved sign-in could not be checked. This does not necessarily mean the token is invalid.', 'status-temp');
+        }
+      } finally {
+        validationActive = false;
+        if (validationQueued) {
+          validationQueued = false;
+          void updateStatus();
+        }
+      }
+    };
+    void updateStatus();
+    const scheduleStatus = () => {
+      clearTimeout(validationTimer);
+      validationTimer = setTimeout(() => void updateStatus(), 500);
+    };
+    homebridge.showSchemaForm();
+    window.homebridge.addEventListener('configChanged', (event) => {
+      const before = JSON.stringify([pluginConfig[0]?.refreshToken, pluginConfig[0]?.tokenFile]);
+      pluginConfig = event.data;
+      const after = JSON.stringify([pluginConfig[0]?.refreshToken, pluginConfig[0]?.tokenFile]);
+      if (before !== after) {
+        validationSequence += 1;
+        if (!signingIn) setStatus('Authentication settings changed. Use sign-in or Apply manual token to replace the saved session.', 'status-neutral');
+        if (!signingIn && pluginConfig[0]?.tokenFile) scheduleStatus();
+      }
+    });
+
+    redirect.addEventListener('input', () => {
+      complete.disabled = !sessionId || !redirect.value.trim();
+    });
+
+    document.querySelector('#credentialAuth').addEventListener('click', async () => {
+      const emailInput = document.querySelector('#authEmail');
+      const passwordInput = document.querySelector('#authPassword');
+      const email = emailInput.value.trim();
+      const password = passwordInput.value;
+      if (!email || !password) {
+        homebridge.toast.error('Enter your Flame Connect email and password.', 'Missing credentials');
+        return;
+      }
+      homebridge.showSpinner();
+      signingIn = true;
+      validationSequence += 1;
+      try {
+        const response = await homebridge.request('/auth/credentials', { email, password, tokenFile: pluginConfig[0]?.tokenFile || '' });
+        await saveRefreshToken(response.refreshToken);
+        emailInput.value = '';
+      } catch (error) {
+        homebridge.toast.error(error.error?.message || error.message, error.message || 'Sign-in failed');
+        setStatus('✕ Sign-in failed. Check the credentials and try again, or use the browser fallback.', 'status-reauth');
+      } finally {
+        // Remove credentials from the page as soon as the request completes.
+        passwordInput.value = '';
+        signingIn = false;
+        homebridge.hideSpinner();
+      }
+    });
+
+    document.querySelector('#manualAuth').addEventListener('click', async () => {
+      signingIn = true;
+      validationSequence += 1;
+      homebridge.showSpinner();
+      try {
+        const response = await homebridge.request('/auth/replace', {
+          refreshToken: pluginConfig[0]?.refreshToken || '', tokenFile: pluginConfig[0]?.tokenFile || '',
+        });
+        await saveRefreshToken(response.refreshToken);
+      } catch (error) {
+        homebridge.toast.error(error.error?.message || error.message, 'Could not apply manual token');
+        setStatus('✕ The manual token could not be applied. Any previously saved sign-in was retained.', 'status-reauth');
+      } finally { signingIn = false; homebridge.hideSpinner(); }
+    });
+
+    document.querySelector('#startAuth').addEventListener('click', async () => {
+      const popup = window.open('about:blank', '_blank');
+      validationSequence += 1;
+      homebridge.showSpinner();
+      try {
+        const response = await homebridge.request('/auth/start', {});
+        sessionId = response.sessionId;
+        openLink.href = response.authorizationUrl;
+        openLink.style.display = 'inline';
+        complete.disabled = !redirect.value.trim();
+        if (popup) popup.location = response.authorizationUrl;
+        setStatus('Sign-in started. Paste the complete returned address below.', 'status-neutral');
+      } catch (error) {
+        popup?.close();
+        homebridge.toast.error(error.error?.message || error.message, 'Could not start sign-in');
+      } finally {
+        homebridge.hideSpinner();
+      }
+    });
+
+    complete.addEventListener('click', async () => {
+      signingIn = true;
+      validationSequence += 1;
+      homebridge.showSpinner();
+      complete.disabled = true;
+      try {
+        const response = await homebridge.request('/auth/complete', {
+          sessionId,
+          redirectUrl: redirect.value.trim(),
+          tokenFile: pluginConfig[0]?.tokenFile || '',
+        });
+        await saveRefreshToken(response.refreshToken);
+        sessionId = '';
+        redirect.value = '';
+        openLink.style.display = 'none';
+      } catch (error) {
+        sessionId = '';
+        homebridge.toast.error(error.error?.message || error.message, error.message || 'Sign-in failed');
+        setStatus('✕ Sign-in failed. Start a new sign-in session and try again.', 'status-reauth');
+      } finally {
+        signingIn = false;
+        homebridge.hideSpinner();
+      }
+    });
+  })();
+</script>

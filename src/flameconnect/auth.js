@@ -1,0 +1,325 @@
+import { createHash, randomBytes } from 'node:crypto';
+import { readFile } from 'node:fs/promises';
+import {
+  API_SCOPE,
+  AUTH_SCOPES,
+  AUTHORIZE_ENDPOINT,
+  CLIENT_ID,
+  REDIRECT_URI,
+  TOKEN_ENDPOINT,
+} from './constants.js';
+import { FlameConnectCloudError, asCloudError } from './errors.js';
+import { readTokenState, withTokenLock, writeTokenState } from './token-store.js';
+
+function base64Url(buffer) {
+  return buffer
+    .toString('base64')
+    .replaceAll('+', '-')
+    .replaceAll('/', '_')
+    .replace(/=+$/u, '');
+}
+
+export class FlameConnectReauthenticationRequiredError extends Error {
+  constructor(message = 'The Flame Connect sign-in has expired or was revoked. Open the plugin settings and sign in again.') {
+    super(message);
+    this.name = 'FlameConnectReauthenticationRequiredError';
+    this.code = 'FLAMECONNECT_REAUTH_REQUIRED';
+  }
+}
+
+export function createPkce() {
+  const verifier = base64Url(randomBytes(48));
+  const challenge = base64Url(createHash('sha256').update(verifier).digest());
+  return { verifier, challenge };
+}
+
+export function buildAuthorizationRequest() {
+  const { verifier, challenge } = createPkce();
+  const state = base64Url(randomBytes(24));
+  // Match MSAL's OIDC auth-code flow. Flame Connect's B2C custom policy
+  // expects the hashed nonce claim that MSAL adds automatically.
+  const nonce = base64Url(randomBytes(24));
+  const nonceHash = base64Url(createHash('sha256').update(nonce).digest());
+  const url = new URL(AUTHORIZE_ENDPOINT);
+  url.search = new URLSearchParams({
+    client_id: CLIENT_ID,
+    client_info: '1',
+    response_type: 'code',
+    redirect_uri: REDIRECT_URI,
+    response_mode: 'query',
+    scope: AUTH_SCOPES.join(' '),
+    state,
+    nonce: nonceHash,
+    code_challenge: challenge,
+    code_challenge_method: 'S256',
+  }).toString();
+  return { url: url.toString(), state, verifier, nonce };
+}
+
+export function parseAuthorizationRedirect(input, expectedState) {
+  const value = String(input).trim();
+  if (value.includes('\u2026') || value.includes('...')) {
+    throw new Error('The redirect address appears truncated. Copy the full address from the browser address bar.');
+  }
+  const question = value.indexOf('?');
+  const hash = value.indexOf('#');
+  const separator = question >= 0 ? question : hash;
+  if (separator < 0) {
+    throw new Error('The pasted redirect URL does not contain query parameters.');
+  }
+  const params = new URLSearchParams(value.slice(separator + 1));
+  const error = params.get('error');
+  if (error) {
+    throw new Error(params.get('error_description') || error);
+  }
+  const state = params.get('state');
+  if (!state || state !== expectedState) {
+    throw new Error('OAuth state mismatch. Start the authorization helper again.');
+  }
+  const code = params.get('code');
+  if (!code) {
+    throw new Error('No authorization code was found in the pasted redirect URL.');
+  }
+  return code;
+}
+
+const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+// Authentication calls get a slightly longer budget than API commands: the
+// token endpoint occasionally pauses before responding, and a slow sign-in
+// must not wedge the whole plugin.
+const AUTH_REQUEST_TIMEOUT_MS = 20_000;
+
+async function tokenRequest(fields) {
+  let response;
+  let lastError;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      response = await fetch(TOKEN_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams(fields),
+        signal: AbortSignal.timeout(AUTH_REQUEST_TIMEOUT_MS),
+      });
+      if (![429, 500, 502, 503, 504].includes(response.status)) break;
+      lastError = new Error(`OAuth HTTP ${response.status}`);
+    } catch (error) {
+      lastError = error;
+    }
+    if (attempt < 2) await delay(250 * (2 ** attempt));
+  }
+  if (!response) {
+    // The token endpoint was unreachable on every attempt: a transient
+    // network failure, so mark it for HomeKit communication-error mapping
+    // rather than leaving a generic error.
+    throw asCloudError(
+      lastError,
+      `Could not reach Flame Connect authentication: ${lastError?.message || 'network error'}`,
+    );
+  }
+  const text = await response.text();
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    // The endpoint answered but not with JSON: a cloud-side problem, so
+    // classify it deliberately rather than leaving a generic SyntaxError.
+    throw new FlameConnectCloudError(
+      `Flame Connect token endpoint returned an invalid response (HTTP ${response.status}).`,
+    );
+  }
+  if (!response.ok || data.error) {
+    if (data.error === 'invalid_grant' || data.error === 'interaction_required') {
+      throw new FlameConnectReauthenticationRequiredError();
+    }
+    const message = data.error_description || data.error || `OAuth HTTP ${response.status}`;
+    // 429/5xx after retries is a transient cloud problem; other OAuth errors
+    // (e.g. invalid_client) are configuration problems and stay unmarked.
+    if ([429, 500, 502, 503, 504].includes(response.status)) {
+      throw new FlameConnectCloudError(message);
+    }
+    throw new Error(message);
+  }
+  return data;
+}
+
+export async function exchangeAuthorizationCode(code, verifier) {
+  return tokenRequest({
+    client_id: CLIENT_ID,
+    client_info: '1',
+    grant_type: 'authorization_code',
+    code,
+    redirect_uri: REDIRECT_URI,
+    code_verifier: verifier,
+    scope: AUTH_SCOPES.join(' '),
+  });
+}
+
+export async function exchangeRefreshToken(refreshToken) {
+  return tokenRequest({
+    client_id: CLIENT_ID,
+    grant_type: 'refresh_token',
+    refresh_token: refreshToken,
+    scope: `offline_access ${API_SCOPE}`,
+  });
+}
+
+export class FlameConnectAuth {
+  constructor({ refreshToken, tokenFile, log }) {
+    this.configRefreshToken = refreshToken || '';
+    this.tokenFile = tokenFile;
+    this.log = log;
+    this.loaded = false;
+    // Shared in-flight token-file load. load() is asynchronous: without this,
+    // a concurrent caller observes `loaded` while the first caller is still
+    // reading the file, skips the read, and proceeds with empty state.
+    this.loadPromise = null;
+    // Shared in-flight refresh. Azure rotates refresh tokens on use, so two
+    // concurrent refreshes can race and invalidate each other; every caller
+    // while a refresh is running joins the same promise instead.
+    this.refreshPromise = null;
+    this.state = {
+      accessToken: '',
+      refreshToken: '',
+      expiresAt: 0,
+    };
+  }
+
+  async load() {
+    if (this.loaded) return;
+    if (!this.loadPromise) {
+      this.loadPromise = this.performLoad().finally(() => {
+        this.loadPromise = null;
+      });
+    }
+    await this.loadPromise;
+  }
+
+  async performLoad() {
+    if (this.tokenFile) {
+      try {
+        const stored = JSON.parse(await readFile(this.tokenFile, 'utf8'));
+        this.state.accessToken = stored.accessToken || '';
+        this.state.refreshToken = stored.refreshToken || '';
+        this.state.expiresAt = Number(stored.expiresAt || 0);
+      } catch (error) {
+        if (error?.code !== 'ENOENT') {
+          this.log?.warn?.(`Could not read Flame Connect token file: ${error.message}`);
+        }
+      }
+    }
+    if (!this.state.refreshToken && this.configRefreshToken) {
+      this.state.refreshToken = this.configRefreshToken;
+    }
+    this.loaded = true;
+  }
+
+  async save() {
+    await writeTokenState(this.tokenFile, this.state);
+  }
+
+  // Read the persisted refresh token without disturbing in-memory state. Used
+  // to recover when another process (for example the settings-page validator)
+  // rotated the token after this instance loaded it.
+  async readStoredRefreshToken() {
+    if (!this.tokenFile) return '';
+    try {
+      const stored = JSON.parse(await readFile(this.tokenFile, 'utf8'));
+      return stored.refreshToken || '';
+    } catch {
+      return '';
+    }
+  }
+
+  async getAccessToken(forceRefresh = false) {
+    await this.load();
+    const now = Date.now();
+    if (!forceRefresh && this.state.accessToken && this.state.expiresAt - now > 5 * 60_000) {
+      return this.state.accessToken;
+    }
+    if (!this.state.refreshToken) {
+      const error = new Error(
+        'No Flame Connect sign-in is configured. Open the plugin settings and complete guided sign-in.',
+      );
+      // Permanent configuration state, not a transient failure: callers use
+      // this code to avoid retrying something that needs user action.
+      error.code = 'FLAMECONNECT_NO_TOKEN';
+      throw error;
+    }
+    if (!this.refreshPromise) {
+      this.refreshPromise = this.performRefresh(forceRefresh).finally(() => {
+        this.refreshPromise = null;
+      });
+    }
+    return this.refreshPromise;
+  }
+
+  // Adopt the stored refresh token when another process rotated it after this
+  // instance loaded its own copy. `failedToken` is the token that just failed,
+  // so a token is only adopted when the file actually holds something newer.
+  // Returns true when a newer token was adopted.
+  async adoptNewerToken(failedToken) {
+    const stored = await this.readStoredRefreshToken();
+    if (stored && stored !== failedToken) {
+      this.log?.debug?.('Flame Connect refresh token was rotated by another process; retrying with the stored token.');
+      this.state.refreshToken = stored;
+      return true;
+    }
+    return false;
+  }
+
+  async performRefresh(forceRefresh = false) {
+    return withTokenLock(this.tokenFile, async () => {
+      let stored;
+      try { stored = await readTokenState(this.tokenFile); }
+      catch (error) { if (!(error instanceof SyntaxError)) throw error; }
+      if (stored?.refreshToken && stored.refreshToken !== this.state.refreshToken) {
+        this.state = { accessToken: stored.accessToken || '', refreshToken: stored.refreshToken,
+          expiresAt: Number(stored.expiresAt || 0) };
+      }
+      if (!forceRefresh && this.state.accessToken && this.state.expiresAt - Date.now() > 5 * 60_000) {
+        return this.state.accessToken;
+      }
+      return this.performRefreshUnlocked();
+    });
+  }
+
+  async performRefreshUnlocked(rotationAttempts = 0) {
+    let data;
+    try {
+      data = await exchangeRefreshToken(this.state.refreshToken);
+    } catch (error) {
+      if (error?.code === 'FLAMECONNECT_REAUTH_REQUIRED') {
+        // The token file is the cross-process coordination point. Another
+        // process (for example the settings-page validator) can rotate the
+        // refresh token at any moment: before the failed exchange, or while
+        // this failure is being handled. If the file holds a token other than
+        // the one that just failed, adopt it and retry instead of demanding
+        // sign-in.
+        const failedToken = this.state.refreshToken;
+        if (rotationAttempts < 2 && await this.adoptNewerToken(failedToken)) return this.performRefreshUnlocked(rotationAttempts + 1);
+        // No newer token exists: the saved token is genuinely revoked. Clear
+        // in-memory credentials only. The file is deliberately never written
+        // on this path: a failed refresh must never overwrite a token another
+        // process saved, not even in the instant between the last check above
+        // and a save.
+        this.state.accessToken = '';
+        this.state.expiresAt = 0;
+        this.state.refreshToken = '';
+        // One final check: a rotation may have landed while handling the
+        // failure above. A newly discovered token is retried, never treated
+        // as a demand to sign in.
+        if (rotationAttempts < 2 && await this.adoptNewerToken(failedToken)) return this.performRefreshUnlocked(rotationAttempts + 1);
+      }
+      throw error;
+    }
+    if (typeof data.access_token !== 'string' || !data.access_token) {
+      throw new FlameConnectCloudError('Flame Connect returned an invalid authentication response.');
+    }
+    this.state.accessToken = data.access_token;
+    this.state.refreshToken = data.refresh_token || this.state.refreshToken;
+    this.state.expiresAt = Date.now() + Math.max(60, Number(data.expires_in || 3600)) * 1000;
+    await this.save();
+    return this.state.accessToken;
+  }
+}

@@ -1,0 +1,236 @@
+{
+  "pluginAlias": "FlameConnect",
+  "pluginType": "platform",
+  "singular": true,
+  "customUi": true,
+  "strictValidation": false,
+  "schema": {
+    "type": "object",
+    "required": ["name"],
+    "additionalProperties": false,
+    "properties": {
+      "name": {
+        "title": "Name",
+        "type": "string",
+        "default": "Flame Connect"
+      },
+      "refreshToken": {
+        "title": "Flame Connect Refresh Token (manual fallback)",
+        "type": "string",
+        "description": "Normally use guided sign-in above. For a helper token, paste it here and select Apply manual token from settings above. Rotated tokens are stored in Homebridge storage.",
+        "format": "password"
+      },
+      "tokenFile": {
+        "title": "Token File (advanced)",
+        "type": "string",
+        "description": "Optional absolute path for the persistent token file. Normally leave blank."
+      },
+      "pollIntervalMinutes": {
+        "title": "Background Refresh Interval",
+        "type": "integer",
+        "minimum": 5,
+        "maximum": 1440,
+        "default": 15,
+        "description": "How often to synchronize changes made in the Flame Connect app. Shorter intervals use more cloud requests; the minimum is 5 minutes."
+      },
+      "cacheSeconds": {
+        "title": "HomeKit Read Cache",
+        "type": "integer",
+        "minimum": 5,
+        "maximum": 600,
+        "default": 30,
+        "description": "Minimum seconds between on-demand cloud reads for one fireplace."
+      },
+      "commandStateMaxAgeSeconds": {
+        "title": "Command State Freshness",
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 60,
+        "default": 10,
+        "description": "Commands reuse recently confirmed fireplace state for faster response. Set to 0 to refresh before every command."
+      },
+      "exposePower": {
+        "title": "Expose Fireplace Power",
+        "type": "boolean",
+        "default": true,
+        "description": "Show the main fireplace power switch in HomeKit."
+      },
+      "exposeFlames": {
+        "title": "Expose Flames and Brightness",
+        "type": "boolean",
+        "default": true,
+        "description": "Show the flame-effect switch and brightness slider in HomeKit."
+      },
+      "exposeHeater": {
+        "title": "Expose Heater Thermostat",
+        "type": "boolean",
+        "default": true,
+        "description": "Show the heater as an off/heat thermostat with target-temperature control when supported. Flame Connect does not report measured room temperature, so HomeKit's current value mirrors the target."
+      },
+      "exposeFlameSpeed": {
+        "title": "Expose Flame Speed",
+        "type": "boolean",
+        "default": true,
+        "description": "Show a five-step HomeKit speed slider. 20%, 40%, 60%, 80%, and 100% correspond to Flame Connect speeds 1 through 5."
+      },
+      "exposeEcoMode": {
+        "title": "Expose Eco Mode",
+        "type": "boolean",
+        "default": true,
+        "description": "Show one Eco Mode switch when advanced heat is supported. Off selects Normal mode without changing whether the thermostat is on."
+      },
+      "exposeFanOnly": {
+        "title": "Expose Fan Only",
+        "type": "boolean",
+        "default": true,
+        "description": "Show Fan Only when the fireplace reports support. Turning it off stops the fan and will not unexpectedly start heat."
+      },
+      "exposeTurboBoost": {
+        "title": "Expose Turbo Boost",
+        "type": "boolean",
+        "default": true,
+        "description": "Show a single timed Turbo Boost switch when the fireplace reports Power Boost support."
+      },
+      "turboBoostMinutes": {
+        "title": "Turbo Boost Duration",
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 20,
+        "default": 20,
+        "description": "Number of minutes requested when Turbo Boost is turned on."
+      },
+      "exposeMediaLight": {
+        "title": "Expose Media Bed",
+        "type": "boolean",
+        "default": true,
+        "description": "Show the media-light switch in HomeKit."
+      },
+      "exposeOverheadLight": {
+        "title": "Expose Media Accent",
+        "type": "boolean",
+        "default": true,
+        "description": "Show the overhead-light switch in HomeKit."
+      },
+      "exposeLogs": {
+        "title": "Expose Logs",
+        "type": "boolean",
+        "default": true,
+        "description": "Show the log or ember effect with on/off, color, and brightness controls when supported."
+      },
+      "powerName": {
+        "title": "Fireplace control name",
+        "type": "string",
+        "default": "Fireplace",
+        "description": "Applied when this setting changes and Homebridge restarts. Later Apple Home renames are preserved."
+      },
+      "flamesName": {
+        "title": "Flames control name",
+        "type": "string",
+        "default": "Flames",
+        "description": "Applied when this setting changes and Homebridge restarts. Later Apple Home renames are preserved."
+      },
+      "heaterName": {
+        "title": "Heater control name",
+        "type": "string",
+        "default": "Heater",
+        "description": "Applied when this setting changes and Homebridge restarts. Later Apple Home renames are preserved."
+      },
+      "flameSpeedName": {
+        "title": "Flame Speed control name",
+        "type": "string",
+        "default": "Flame Speed",
+        "description": "Applied when this setting changes and Homebridge restarts. Later Apple Home renames are preserved."
+      },
+      "ecoModeName": {
+        "title": "Eco Mode control name",
+        "type": "string",
+        "default": "Eco Mode"
+      },
+      "fanOnlyName": {
+        "title": "Fan Only control name",
+        "type": "string",
+        "default": "Fan Only"
+      },
+      "turboBoostName": {
+        "title": "Turbo Boost control name",
+        "type": "string",
+        "default": "Turbo Boost"
+      },
+      "mediaLightName": {
+        "title": "Media Bed control name",
+        "type": "string",
+        "default": "Media Bed",
+        "description": "Applied when this setting changes and Homebridge restarts. Later Apple Home renames are preserved."
+      },
+      "overheadName": {
+        "title": "Media Accent control name",
+        "type": "string",
+        "default": "Media Accent",
+        "description": "Applied when this setting changes and Homebridge restarts. Later Apple Home renames are preserved."
+      },
+      "logsName": {
+        "title": "Logs control name",
+        "type": "string",
+        "default": "Logs",
+        "description": "Applied when this setting changes and Homebridge restarts. Later Apple Home renames are preserved."
+      },
+      "pulsatingName": {
+        "title": "Pulsating Effect control name",
+        "type": "string",
+        "default": "Pulsating Effect",
+        "description": "Applied when this setting changes and Homebridge restarts. Later Apple Home renames are preserved."
+      },
+      "ambientName": {
+        "title": "Ambient Sensor control name",
+        "type": "string",
+        "default": "Ambient Sensor",
+        "description": "Applied when this setting changes and Homebridge restarts. Later Apple Home renames are preserved."
+      },
+      "advancedControls": {
+        "title": "Expose Advanced Switches",
+        "type": "boolean",
+        "default": false,
+        "description": "Also expose Pulsating Effect and Ambient Sensor as switches."
+      },
+      "debugLighting": {
+        "title": "Lighting Diagnostics",
+        "type": "boolean",
+        "default": false,
+        "description": "Temporarily log light inputs, combined RGBW commands, and timing to investigate transitions. No device identifiers or credentials are included. Disable after testing."
+      }
+    }
+  },
+  "layout": [
+    "name",
+    "refreshToken",
+    "pollIntervalMinutes",
+    "cacheSeconds",
+    "commandStateMaxAgeSeconds",
+    "exposePower",
+    "exposeFlames",
+    "exposeHeater",
+    "exposeEcoMode",
+    "exposeFanOnly",
+    "exposeTurboBoost",
+    "turboBoostMinutes",
+    "exposeFlameSpeed",
+    "exposeMediaLight",
+    "exposeOverheadLight",
+    "exposeLogs",
+    "advancedControls",
+    "debugLighting",
+    "powerName",
+    "flamesName",
+    "heaterName",
+    "ecoModeName",
+    "fanOnlyName",
+    "turboBoostName",
+    "flameSpeedName",
+    "mediaLightName",
+    "overheadName",
+    "logsName",
+    "pulsatingName",
+    "ambientName",
+    "tokenFile"
+  ]
+}
