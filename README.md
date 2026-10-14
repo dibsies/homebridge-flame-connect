@@ -140,7 +140,6 @@ The package name starts with `homebridge-`, its keywords include `homebridge-plu
 
 ## Limitations
 
-- The color-wheel drag correction in v1.0.1 was physically confirmed on the owner’s EVO74. Other models and unusually slow or continuous gestures can still produce intermediate colors; HomeKit does not provide a reliable finger-release event.
 - Main power/flame operation, thermostat, heater modes, Flame Speed, RGBW Logs, and Media Bed/Media Accent color and dimming have been user-confirmed on one fireplace. Other fireplace models still need physical verification.
 - Media Bed, Media Accent, and Logs are implemented writes (Flame Effect parameter 322 and Log Effect parameter 370). Unsupported features or rejected commands may prevent a physical effect.
 - Flame color presets, timer, sound, Schedule heat mode, and media-theme selection are not exposed as HomeKit controls.
