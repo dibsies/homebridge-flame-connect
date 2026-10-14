@@ -7,6 +7,11 @@ export function runCommand(entry, operation) {
   return commands.run(entry, operation);
 }
 
+export function currentCommandTrace() {
+  const entry = commands.getStore();
+  return entry?.lightingTrace;
+}
+
 export function assertCanSubmit() {
   const entry = commands.getStore();
   if (entry && (entry.cancelled || entry.isDisposed() || Date.now() >= entry.deadlineAt)) {

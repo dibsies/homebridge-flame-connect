@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.1
+
+- Make the owner-confirmed color-wheel drag correction the default: 400 ms input quiet window, bounded 750 ms staging, and replacement of obsolete same-light samples still waiting for packet preparation, including slow cloud overview reads.
+- Accept HomeKit hue/saturation inputs into the bounded queue promptly so later drag samples can arrive; successful input acceptance is not a guarantee of physical execution. Later cloud errors remain logged, and confirmed displayed state is restored where possible. Power, heat, light On/Off and brightness keep their existing completion semantics.
+- Preserve deliberately selected pastel/white colors and the original RGBW converter. No RGB-only workaround is included.
+- Preserve non-color ordering boundaries and cancel unsent color batches on light Off, main power Off or shutdown. Prepared/sent packets remain immutable and are never replayed.
+- Remove the experimental configuration switch. Retain optional Advanced Diagnostics (off by default, existing debugLighting key), remove duplicate lighting logs, and skip diagnostic context creation, timing, packet decoding and trace serialization during normal operation. Ordinary warnings/errors remain.
+- Add regressions for the captured drag cadence, stale queued samples, cancellation, ordering and the disabled diagnostic fast path. The owner confirmed the drag flash correction on an EVO74; other models and gesture cadences still need physical verification.
+
 ## 1.0.0
 
 - Promote the owner-confirmed RC5 command-response correction without changing runtime control logic.

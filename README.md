@@ -88,7 +88,7 @@ Each control has an editable name in plugin settings, including the optional adv
 
 Commands for each fireplace run in order so simultaneous Home commands do not write over one another. Cloud result-code rejections are reported as errors. Successful cloud requests do not by themselves prove a physical lighting change; Logs still needs device validation.
 
-Light On, hue, saturation, and brightness gestures are combined into one trailing-edge cloud write per light, with a maximum 750 ms staging time. Turning a light off while its color is still pending preserves the selected color without sending an obsolete color command. Apple Home continues to display the remembered hue and saturation while brightness is zero; On restores the last nonzero brightness and color together.
+Light On, hue, saturation, and brightness gestures are combined into one cloud write per light after 400 ms of input quiet, with a maximum 750 ms initial staging time. Newer same-light samples replace older samples still waiting for packet preparation, including during a slow overview read. HomeKit hue/saturation responses accept queued intent promptly so further drag samples can arrive; this is not physical execution confirmation. Cloud failures remain logged and confirmed displayed state is restored where possible. Power, heat, On/Off and brightness retain their normal completion semantics. Turning a light off while its color is still pending preserves the selected color without sending an obsolete color command. Apple Home continues to display the remembered hue and saturation while brightness is zero; On restores the last nonzero brightness and color together.
 
 For a manual token, paste it into **Flame Connect Refresh Token**, select **Apply manual token from settings**, then save settings and restart. This validates and replaces the saved session instead of reusing an old token file.
 
@@ -118,7 +118,7 @@ The ten-second window is measured from the last complete overview, not extended 
 
 After an accepted command, its changed fields are protected from lagging cloud echoes for ten seconds. Other fields still synchronize normally. Expired protection forces a real overview read; it cannot hold a value indefinitely.
 
-Enable **Lighting Diagnostics** temporarily in plugin settings to record light inputs, combined RGBW commands, and timing in the normal Homebridge log. These entries use anonymous fireplace labels and omit device identifiers and credentials. Disable the setting after testing.
+**Advanced Diagnostics** is off by default. Temporarily enable it to record anonymous inputs, actual control packets, batching/queue/cache activity and cloud timings in Homebridge logs. It retains the existing debugLighting configuration key, so a previously enabled diagnostic setting remains enabled until you turn it off. Normal operation skips diagnostic context creation, timing, packet decoding and trace serialization. Ordinary warnings/errors remain enabled. Disable diagnostics after troubleshooting; diagnostic logging itself adds local processing and log I/O overhead.
 
 Background refreshes do not overlap, startup refreshes use bounded concurrency for multi-fireplace accounts, and polling stops when authentication is known to require user action. Fireplace-reported fault bytes are logged on state transitions without exposing device identifiers.
 
@@ -128,8 +128,8 @@ Download the release `.tgz` on the Homebridge machine and install it into the sa
 
 ```bash
 cd /tmp
-wget https://github.com/dibsies/homebridge-flame-connect/releases/download/v1.0.0/homebridge-flame-connect-1.0.0.tgz
-/opt/homebridge/bin/npm install --prefix /var/lib/homebridge /tmp/homebridge-flame-connect-1.0.0.tgz
+wget https://github.com/dibsies/homebridge-flame-connect/releases/download/v1.0.1/homebridge-flame-connect-1.0.1.tgz
+/opt/homebridge/bin/npm install --prefix /var/lib/homebridge /tmp/homebridge-flame-connect-1.0.1.tgz
 ```
 
 Do not use `npm install -g` for this Homebridge image: that puts the plugin under `/opt/homebridge/lib/node_modules`, while the service and its locally installed plugins live under `/var/lib/homebridge/node_modules`. Restart Homebridge after installation.
@@ -140,7 +140,7 @@ The package name starts with `homebridge-`, its keywords include `homebridge-plu
 
 ## Limitations
 
-- Known issue: changing a colored light can briefly flash white before the selected color appears. The owner confirmed this remains in RC5. Its cause is unresolved; v1.0.0 intentionally retains the working RC5 behavior without further color-control changes.
+- The color-wheel drag correction in v1.0.1 was physically confirmed on the owner’s EVO74. Other models and unusually slow or continuous gestures can still produce intermediate colors; HomeKit does not provide a reliable finger-release event.
 - Main power/flame operation, thermostat, heater modes, Flame Speed, RGBW Logs, and Media Bed/Media Accent color and dimming have been user-confirmed on one fireplace. Other fireplace models still need physical verification.
 - Media Bed, Media Accent, and Logs are implemented writes (Flame Effect parameter 322 and Log Effect parameter 370). Unsupported features or rejected commands may prevent a physical effect.
 - Flame color presets, timer, sound, Schedule heat mode, and media-theme selection are not exposed as HomeKit controls.

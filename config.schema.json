@@ -193,10 +193,10 @@
         "description": "Also expose Pulsating Effect and Ambient Sensor as switches."
       },
       "debugLighting": {
-        "title": "Lighting Diagnostics",
+        "title": "Advanced Diagnostics",
         "type": "boolean",
         "default": false,
-        "description": "Temporarily log light inputs, combined RGBW commands, and timing to investigate transitions. No device identifiers or credentials are included. Disable after testing."
+        "description": "Off by default. Temporarily record anonymous lighting packets, inputs, queue/cache activity and cloud timing for troubleshooting. No credentials, custom names or device identifiers are included. Normal operation skips diagnostic timing and packet decoding. Disable after troubleshooting."
       }
     }
   },

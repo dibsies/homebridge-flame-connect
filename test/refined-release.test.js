@@ -12,6 +12,10 @@ import { decodeParameter, encodeFlame } from '../src/flameconnect/protocol.js';
 import { runCommand, markCommandDispatched } from '../src/flameconnect/command.js';
 import { replaceSignIn } from '../src/flameconnect/sign-in.js';
 import { readTokenState, withTokenLock, writeTokenState } from '../src/flameconnect/token-store.js';
+import { createLightingTrace, lightingState, lightingPackets } from '../src/flameconnect/lighting-trace.js';
+import { currentCommandTrace } from '../src/flameconnect/command.js';
+import { currentReadTrace } from '../src/flameconnect/lighting-trace.js';
+import { performance } from 'node:perf_hooks';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 function fixture(config = {}) {
@@ -42,6 +46,301 @@ function fixture(config = {}) {
     withHeat: true, features: { advancedHeat: true, fanOnly: true, powerBoost: true, rgbLogEffect: true } });
   return { handler, remote, client, writes, messages, accessory, reads: () => reads };
 }
+
+test('normal operation creates no diagnostic command/read context or timing measurements', async (t) => {
+  const originalNow = performance.now;
+  let timerCalls = 0;
+  performance.now = () => { timerCalls += 1; return originalNow.call(performance); };
+  const f = fixture({ debugLighting: false }); t.after(() => f.handler.dispose());
+  const originalFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = originalFetch; });
+  const reader = f.client.getFireOverview;
+  f.client.getFireOverview = async (...args) => { assert.equal(currentReadTrace(), undefined); return reader(...args); };
+  f.client.auth = { getAccessToken: async () => 'synthetic' };
+  f.client.writeParameters = FlameConnectClient.prototype.writeParameters.bind(f.client);
+  globalThis.fetch = async (_url, options) => {
+    assert.equal(currentCommandTrace(), undefined);
+    const body = JSON.parse(options.body);
+    for (const entry of body.Parameters) {
+      const decoded = decodeParameter(entry.ParameterId, entry.Value);
+      f.remote[decoded.type] = decoded;
+    }
+    return { ok: true, status: 200, text: async () => '{}' };
+  };
+  try {
+    await f.handler.refresh();
+    await f.handler.setLightColor('mediaColor', 'hue', 240);
+    assert.equal(f.remote.flame.mediaColor.blue, 255);
+    assert.equal(timerCalls, 0);
+    assert.ok(!f.messages.some(([, line]) => line.startsWith('Lighting')));
+  } finally { performance.now = originalNow; }
+});
+
+test('diagnostic inputs, Off, and actual HTTP packets are correlated without private data', async (t) => {
+  const f = fixture({ debugLighting: true }); t.after(() => f.handler.dispose());
+  useHttpWriter(f, t);
+  const captured = [];
+  const writer = globalThis.fetch;
+  globalThis.fetch = async (url, options) => { captured.push(JSON.parse(options.body)); return writer(url, options); };
+  f.client.auth.getAccessToken = async () => 'SYNTHETIC-SECRET-TOKEN';
+  f.remote.flame.privateName = 'SYNTHETIC-PRIVATE-NAME';
+  f.remote.flame.mediaColor.privateId = 'SYNTHETIC-PRIVATE-ID';
+  await f.handler.refresh();
+  const light = f.handler.mediaService;
+  await Promise.all([
+    light.getCharacteristic(hap.Characteristic.Hue).handleSetRequest(240),
+    light.getCharacteristic(hap.Characteristic.Saturation).handleSetRequest(100),
+    light.getCharacteristic(hap.Characteristic.Brightness).handleSetRequest(75),
+  ]);
+  await light.getCharacteristic(hap.Characteristic.On).handleSetRequest(false);
+  await light.getCharacteristic(hap.Characteristic.On).handleSetRequest(true);
+  await f.handler.powerService.getCharacteristic(hap.Characteristic.On).handleSetRequest(false);
+  const lines = f.messages.map(([, message]) => message).filter((message) => message.startsWith('LightingTrace '));
+  const events = lines.map((line) => JSON.parse(line.slice('LightingTrace '.length)));
+  assert.ok(events.some((event) => event.event === 'input.color' && event.field === 'hue' && event.value === 240));
+  assert.ok(events.some((event) => event.event === 'input.color' && event.field === 'saturation'));
+  assert.ok(events.some((event) => event.event === 'input.color' && event.field === 'brightness'));
+  assert.ok(events.some((event) => event.event === 'input.control' && event.control === 'setFlameFlag' && event.values[1] === false));
+  assert.ok(events.some((event) => event.event === 'input.control' && event.control === 'setPower'));
+  const sends = events.filter((event) => event.event === 'http.send' && event.operation === 'write');
+  assert.equal(sends.length, captured.length);
+  for (let index = 0; index < sends.length; index += 1) {
+    assert.match(sends[index].command, /^c\d+$/);
+    for (const packet of sends[index].packets) {
+      assert.equal(packet.hex, Buffer.from(captured[index].Parameters.find((p) => p.ParameterId === packet.parameter).Value, 'base64').toString('hex'));
+    }
+    assert.ok(events.some((event) => event.event === 'http.response' && event.request === sends[index].request && event.command === sends[index].command));
+  }
+  assert.ok(events.some((event) => event.event === 'overview.received'));
+  assert.ok(events.some((event) => event.event === 'home.publish'));
+  assert.ok(events.some((event) => event.event === 'home.characteristics' && event.lights.Bed.Hue === 240));
+  assert.ok(events.some((event) => event.event === 'auth.ready' && event.durationMs >= 0));
+  assert.ok(events.some((event) => event.event === 'http.body.ready' && event.responseBytes >= 0));
+  assert.ok(events.some((event) => event.event === 'queue.completed' && event.totalMs >= 0));
+  assert.ok(events.some((event) => event.event === 'batch.ready' && event.componentWrites >= 3 && event.stagedMs >= 0));
+  for (let index = 1; index < events.length; index += 1) {
+    assert.equal(events[index].eventNumber, events[index - 1].eventNumber + 1);
+    assert.ok(events[index].elapsedMs >= events[index - 1].elapsedMs);
+  }
+  assert.doesNotMatch(lines.join('\n'), /PRIVATE-ID|PRIVATE-NAME|SECRET-TOKEN|Test Fireplace|Authorization|Bearer/);
+});
+
+test('diagnostics enabled and disabled produce identical HTTP commands and final state', async (t) => {
+  async function scenario(enabled) {
+    const f = fixture({ debugLighting: enabled });
+    useHttpWriter(f, t);
+    const packets = [];
+    const writer = globalThis.fetch;
+    globalThis.fetch = async (url, options) => { packets.push(JSON.parse(options.body).Parameters); return writer(url, options); };
+    try {
+      await f.handler.refresh();
+      await Promise.all([f.handler.setLightColor('mediaColor', 'hue', 240), f.handler.setLightColor('mediaColor', 'saturation', 100)]);
+      await f.handler.setFlameFlag('mediaLight', false);
+      await f.handler.setFlameFlag('mediaLight', true);
+      await f.handler.setLightColor('overheadColor', 'hue', 0);
+      await f.handler.setPower(false);
+      if (!enabled) assert.ok(!f.messages.some(([, message]) => message.startsWith('LightingTrace ')));
+      return { packets, remote: structuredClone(f.remote) };
+    } finally { f.handler.dispose(); }
+  }
+  // Each scenario gets a fresh real client; restore fetch between scenarios
+  // so wrappers cannot accidentally capture each other's requests.
+  const originalFetch = globalThis.fetch;
+  const off = await scenario(false);
+  globalThis.fetch = originalFetch;
+  const on = await scenario(true);
+  globalThis.fetch = originalFetch;
+  assert.deepEqual(on, off);
+});
+
+test('diagnostic projection omits metadata, unknown packets and extra packet bytes; broken logger is harmless', () => {
+  assert.deepEqual(lightingState({ flame: { flameEffect: 1, FireId: 'PRIVATE-ID', mediaColor: { red: 255, green: 0, blue: 0, white: 0, token: 'SECRET' } } }),
+    { flame: { flameEffect: 1, mediaColor: { red: 255, green: 0, blue: 0, white: 0 } } });
+  const value = encodeFlame({ flameEffect: 1 });
+  const extended = Buffer.concat([Buffer.from(value, 'base64'), Buffer.from('PRIVATE-ID')]).toString('base64');
+  assert.deepEqual(lightingPackets([{ ParameterId: 999, Value: 'PRIVATE-ID' }, { ParameterId: 322, Value: extended }]), [{ parameter: 322, omitted: true }]);
+  const trace = createLightingTrace(() => true, () => 'PRIVATE-ID', { info() { throw new Error('broken logger'); } });
+  assert.doesNotThrow(() => trace.emit('test'));
+});
+
+test('experiment B lets sequential acknowledged hue/saturation samples form one final HTTP packet', async (t) => {
+  const f = fixture({ debugLighting: true });
+  t.after(() => f.handler.dispose()); useHttpWriter(f, t); await f.handler.refresh();
+  const light = f.handler.mediaService;
+  // Model a Home client waiting for each characteristic response before
+  // supplying the next sample. Earlier builds could not combine these.
+  await light.getCharacteristic(hap.Characteristic.Hue).handleSetRequest(359);
+  await light.getCharacteristic(hap.Characteristic.Saturation).handleSetRequest(65);
+  await light.getCharacteristic(hap.Characteristic.Hue).handleSetRequest(240);
+  await light.getCharacteristic(hap.Characteristic.Saturation).handleSetRequest(100);
+  assert.equal(f.writes.length, 0);
+  await f.handler.commandQueue;
+  assert.equal(f.writes.length, 1);
+  assert.deepEqual(f.remote.flame.mediaColor, { red: 0, green: 0, blue: 255, white: 0 });
+  assert.equal(f.remote.flame.overheadColor.green, 255);
+});
+
+test('experiment B settles an accepted input failure and subsequent writes can recover', async (t) => {
+  const f = fixture({ debugLighting: true });
+  t.after(() => f.handler.dispose()); await f.handler.refresh();
+  const original = f.client.writeParameters;
+  f.client.writeParameters = async () => { markCommandDispatched(); throw new FlameConnectCloudError('Synthetic failure'); };
+  await f.handler.setLightColor('mediaColor', 'hue', 240, true);
+  await f.handler.commandQueue;
+  await sleep(0);
+  assert.equal(f.handler.pendingColors.size, 0);
+  assert.equal(f.remote.flame.mediaColor.red, 255);
+  assert.ok(f.messages.some(([, line]) => line.includes('input.backgroundFailed')));
+  await assert.rejects(f.handler.setLightColor('mediaColor', 'hue', 120, true));
+  f.handler.cloudFailureUntil = 0;
+  f.client.writeParameters = original;
+  await f.handler.setLightColor('mediaColor', 'hue', 240, true);
+  await f.handler.commandQueue;
+  assert.equal(f.remote.flame.mediaColor.blue, 255);
+});
+
+test('experiment B keeps Off ordering and brightness acknowledgement unchanged', async (t) => {
+  const f = fixture({  }); t.after(() => f.handler.dispose());
+  await f.handler.refresh();
+  await f.handler.setLightColor('mediaColor', 'hue', 240, true);
+  await f.handler.setFlameFlag('mediaLight', false);
+  assert.equal(f.writes.length, 1);
+  assert.equal(f.remote.flame.mediaLight, 0);
+  assert.equal(f.remote.flame.mediaColor.red, 255);
+  await f.handler.setFlameFlag('mediaLight', true);
+  assert.equal(f.remote.flame.mediaColor.blue, 255);
+  await f.handler.setLightColor('mediaColor', 'brightness', 50, true);
+  assert.equal(f.remote.flame.mediaColor.blue, 128);
+});
+
+test('C coalesces captured 220/280 ms drag samples into final blue with no near-white packet', async (t) => {
+  const f = fixture({ debugLighting: true });
+  t.after(() => f.handler.dispose()); useHttpWriter(f, t); await f.handler.refresh();
+  const light = f.handler.overheadService;
+  const sample = async (hue, saturation) => {
+    await light.getCharacteristic(hap.Characteristic.Hue).handleSetRequest(hue);
+    await light.getCharacteristic(hap.Characteristic.Saturation).handleSetRequest(saturation);
+  };
+  await sample(8, 100);
+  await sleep(220);
+  await sample(262, 22);
+  await sleep(280);
+  await sample(240, 100);
+  await f.handler.commandQueue;
+  assert.equal(f.writes.length, 1);
+  assert.deepEqual(f.remote.flame.overheadColor, { red: 0, green: 0, blue: 255, white: 0 });
+});
+
+test('C replaces a ready near-white sample during a blocked overview before preparing its HTTP packet', async (t) => {
+  const f = fixture({ commandStateMaxAgeSeconds: 0, debugLighting: true });
+  t.after(() => f.handler.dispose()); useHttpWriter(f, t); await f.handler.refresh();
+  let release, entered;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const started = new Promise((resolve) => { entered = resolve; });
+  f.client.getFireOverview = async () => { entered(); await gate; return { parameters: structuredClone(f.remote) }; };
+  await f.handler.setLightColor('mediaColor', 'hue', 262, true);
+  await f.handler.setLightColor('mediaColor', 'saturation', 22, true);
+  await started;
+  await f.handler.setLightColor('mediaColor', 'hue', 240, true);
+  await f.handler.setLightColor('mediaColor', 'saturation', 100, true);
+  assert.equal(f.handler.queueDepth, 1);
+  release(); await f.handler.commandQueue;
+  assert.equal(f.writes.length, 1);
+  assert.deepEqual(f.remote.flame.mediaColor, { red: 0, green: 0, blue: 255, white: 0 });
+  assert.ok(f.messages.some(([, line]) => line.includes('batch.superseded')));
+});
+
+test('C Off cancels an unsent color even after its batch timer released during a slow read', async (t) => {
+  const f = fixture({ commandStateMaxAgeSeconds: 0 });
+  t.after(() => f.handler.dispose()); await f.handler.refresh();
+  let release, entered;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const started = new Promise((resolve) => { entered = resolve; });
+  f.client.getFireOverview = async () => { entered(); await gate; return { parameters: structuredClone(f.remote) }; };
+  await f.handler.setLightColor('mediaColor', 'hue', 262, true);
+  await started;
+  const off = f.handler.setFlameFlag('mediaLight', false);
+  release(); await off;
+  assert.equal(f.writes.length, 1);
+  assert.equal(f.remote.flame.mediaLight, 0);
+  assert.equal(f.remote.flame.mediaColor.red, 255);
+});
+
+test('C whole-fireplace Off cancels ready unsent colors during a slow read', async (t) => {
+  const f = fixture({ commandStateMaxAgeSeconds: 0 });
+  t.after(() => f.handler.dispose()); await f.handler.refresh();
+  let release, entered;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const started = new Promise((resolve) => { entered = resolve; });
+  f.client.getFireOverview = async () => { entered(); await gate; return { parameters: structuredClone(f.remote) }; };
+  await f.handler.setLightColor('mediaColor', 'hue', 262, true);
+  await started;
+  const off = f.handler.setPower(false);
+  release(); await off;
+  assert.equal(f.writes.length, 1);
+  assert.equal(f.writes[0][0].type, 'mode');
+  assert.equal(f.remote.mode.mode, 0);
+});
+
+test('C shutdown cancels ready unsent color and settles detached input failures', async (t) => {
+  const f = fixture({ commandStateMaxAgeSeconds: 0 });
+  t.after(() => f.handler.dispose()); await f.handler.refresh();
+  let release, entered;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const started = new Promise((resolve) => { entered = resolve; });
+  f.client.getFireOverview = async () => { entered(); await gate; return { parameters: structuredClone(f.remote) }; };
+  await f.handler.setLightColor('mediaColor', 'hue', 262, true);
+  await started;
+  f.handler.dispose(); release();
+  await f.handler.commandQueue; await sleep(0);
+  assert.equal(f.writes.length, 0);
+  assert.equal(f.handler.colorOperations.size, 0);
+});
+
+test('C cannot merge a new color across a heater ordering boundary', async (t) => {
+  const f = fixture({ commandStateMaxAgeSeconds: 0 });
+  t.after(() => f.handler.dispose()); await f.handler.refresh();
+  let release, entered;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const started = new Promise((resolve) => { entered = resolve; });
+  f.client.getFireOverview = async () => { entered(); await gate; return { parameters: structuredClone(f.remote) }; };
+  await f.handler.setLightColor('mediaColor', 'hue', 262, true);
+  await f.handler.setLightColor('mediaColor', 'saturation', 22, true);
+  await started;
+  const heat = f.handler.setHeat(true);
+  await f.handler.setLightColor('mediaColor', 'hue', 240, true);
+  await f.handler.setLightColor('mediaColor', 'saturation', 100, true);
+  release(); await heat; await f.handler.commandQueue;
+  assert.deepEqual(f.writes.map((packet) => packet[0].type), ['flame', 'heat', 'flame']);
+  assert.equal(f.writes[0][0].mediaColor.white, 199);
+  assert.equal(f.remote.flame.mediaColor.blue, 255);
+  assert.equal(f.remote.heat.heatStatus, 1);
+});
+
+test('C freezes already transmitted color packets instead of modifying or replaying them', async (t) => {
+  const f = fixture({  });
+  t.after(() => f.handler.dispose()); useHttpWriter(f, t); await f.handler.refresh();
+  let release, entered;
+  const gate = new Promise((resolve) => { release = resolve; });
+  const started = new Promise((resolve) => { entered = resolve; });
+  const writer = globalThis.fetch;
+  let firstBody;
+  globalThis.fetch = async (url, options) => {
+    const response = await writer(url, options);
+    if (!firstBody) { firstBody = options.body; entered(); await gate; }
+    return response;
+  };
+  await f.handler.setLightColor('mediaColor', 'hue', 262, true);
+  await f.handler.setLightColor('mediaColor', 'saturation', 22, true);
+  await started;
+  await f.handler.setLightColor('mediaColor', 'hue', 240, true);
+  await f.handler.setLightColor('mediaColor', 'saturation', 100, true);
+  release(); await f.handler.commandQueue;
+  assert.equal(f.writes.length, 2);
+  const sent = JSON.parse(firstBody).Parameters[0];
+  assert.equal(decodeParameter(sent.ParameterId, sent.Value).mediaColor.white, 199);
+  assert.equal(f.remote.flame.mediaColor.blue, 255);
+});
 
 test('an expired pre-read never submits the power command', async (t) => {
   const f = fixture({ commandStateMaxAgeSeconds: 0 });

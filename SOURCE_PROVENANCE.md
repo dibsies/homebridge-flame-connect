@@ -1,12 +1,10 @@
 # Source provenance
 
-Version 1.0.0 retains the runtime source from the owner-tested 1.0.0-rc.5 candidate. Only release metadata, documentation, and the package-version assertion change. Repository history starts fresh using the public `dibsies` identity.
+Version 1.0.1 derives from public v1.0.0 commit bcbfb899772d7662426c617d8b9ca48d61030816 and the owner-tested C candidate. C’s color handling is now the default, and diagnostics are gated off by default. Original encoders, RGBW conversion, service identities and authentication decisions are retained. No native macOS helper is included.
 
-The source archive contains no Git history, local credentials, installed dependencies, or machine-specific paths. It can be used as the reviewed source for a fresh repository. Use the `dibsies` public identity and a GitHub no-reply address when creating new commits.
+Source archives exclude Git history, credentials, dependencies and machine-specific paths. Commit author/committer identity must remain dibsies with its GitHub no-reply address.
 
-The independent protocol implementation credits the Apache-2.0 projects listed in NOTICE:
+Upstream Apache-2.0 attribution is retained in NOTICE:
 
 - https://github.com/deviantintegral/flameconnect
 - https://github.com/deviantintegral/flame_connect_ha
-
-The native macOS helper is retired. Historical source is preserved in the owner's private local backup, not in the fresh public repository. Guided Homebridge sign-in and the cross-platform terminal fallback remain available.

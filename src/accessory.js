@@ -1,7 +1,9 @@
 import { Brightness, FireMode, HeatMode, OnOff } from './flameconnect/client.js';
 import { hsvToRgbw, rgbwToHsv } from './flameconnect/color.js';
 import { FlameConnectCloudError, isCloudError } from './flameconnect/errors.js';
-import { assertCanSubmit, runCommand } from './flameconnect/command.js';
+import { assertCanSubmit, runCommand, currentCommandTrace } from './flameconnect/command.js';
+import { createLightingTrace, lightingState, withReadTrace } from './flameconnect/lighting-trace.js';
+import { performance } from 'node:perf_hooks';
 
 // HomeKit expects characteristic handlers to settle quickly; the installed
 // HAP-NodeJS times out reads and writes after roughly nine seconds. Every
@@ -115,13 +117,18 @@ export class FlameConnectAccessory {
     this.disposed = false;
     this.pendingColors = new Map();
     this.colorOperations = new Set();
-    this.traceStartedAt = Date.now();
+    this.colorOrderEpoch = 0;
+    this.lightingTrace = createLightingTrace(() => this.platform.config.debugLighting === true,
+      () => this.debugLabel || 'fireplace', this.platform.log);
     // Serialize the entire read/modify/write operation, not just the POST.
     for (const method of ['setPower', 'setFlames', 'setFlameBrightness', 'setFlameSpeed', 'setFlameFlag',
       'setHeat', 'setHeatTemperature', 'setEcoMode', 'setFanOnly', 'setTurboBoost',
       'setLogs']) {
       const operation = this[method].bind(this);
       this[method] = (...args) => {
+        if (this.lightingTrace.enabled()) this.lightingTrace.emit('input.control', { control: method,
+          values: args.map((value) => typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value))
+            ? value : ['mediaLight', 'overheadLight', 'pulsatingEffect', 'ambientSensor'].includes(value) ? value : null) });
         const cancelledColors = [];
         if (method === 'setFlameFlag' && args[1] === true
           && ['mediaLight', 'overheadLight'].includes(args[0])) {
@@ -139,9 +146,14 @@ export class FlameConnectAccessory {
         } else if (method === 'setLogs' && args[0] === false) {
           cancelledColors.push(this.cancelPendingColor('logColor'));
         } else if (method === 'setPower' && args[0] === false) {
-          for (const key of this.pendingColors.keys()) cancelledColors.push(this.cancelPendingColor(key));
+          const keys = new Set(this.pendingColors.keys());
+          for (const batch of this.colorOperations) if (!batch.sealed) keys.add(batch.key);
+          for (const key of keys) cancelledColors.push(this.cancelPendingColor(key));
         }
         for (const key of [...this.pendingColors.keys()]) this.flushPendingColor(key);
+        // Inputs arriving after this non-color command must not be folded
+        // into an earlier queue slot and jump across the ordering boundary.
+        this.colorOrderEpoch += 1;
         const queued = this.enqueueCommand(() => operation(...args), method);
         const pending = this.withWriteDeadline(queued, method);
         for (const color of cancelledColors.filter(Boolean)) this.settleColorWaiters(color.waiters, pending);
@@ -326,7 +338,7 @@ export class FlameConnectAccessory {
         [Characteristic.Saturation, 'saturation'], [Characteristic.Brightness, 'brightness']]) {
         this.logService.getCharacteristic(characteristic)
           .onGet(async () => { await this.ensureFresh(); return this.reportedHsv('logColor', this.state.log?.color)[field]; })
-          .onSet((value) => this.setLogColor(field, Number(value)));
+          .onSet((value) => this.setLogColor(field, Number(value), true));
       }
     } else {
       this.removeService(Service.Lightbulb, 'log-effect');
@@ -372,7 +384,7 @@ export class FlameConnectAccessory {
       for (const [characteristic, field] of [[Characteristic.Hue,'hue'], [Characteristic.Saturation,'saturation'], [Characteristic.Brightness,'brightness']]) {
         service.getCharacteristic(characteristic)
           .onGet(async () => { await this.ensureFresh(); return this.reportedHsv(key, this.state.flame?.[key])[field]; })
-          .onSet(value => this.setLightColor(key, field, Number(value)));
+          .onSet(value => this.setLightColor(key, field, Number(value), true));
       }
     }
   }
@@ -387,6 +399,8 @@ export class FlameConnectAccessory {
   enqueueCommand(operation, label = 'command') {
     if (this.disposed) return Promise.reject(new Error('Flame Connect accessory is shutting down.'));
     const queuedAt = Date.now();
+    const traceQueuedAt = this.lightingTrace.enabled() ? performance.now() : 0;
+    let traceStartedAt;
     // Lifecycle of this queue entry. withWriteDeadline cancels the entry when
     // the HomeKit response window elapses before it starts: executing later,
     // after Home already reported failure, would change the fireplace
@@ -394,6 +408,13 @@ export class FlameConnectAccessory {
     // (a sent write can no longer be un-sent).
     const entry = { started: false, dispatched: false, cancelled: false,
       deadlineAt: queuedAt + HAP_HANDLER_TIMEOUT_MS, isDisposed: () => this.disposed };
+    if (this.lightingTrace.enabled()) {
+      const commandId = this.lightingTrace.nextCommand();
+      entry.lightingTrace = { enabled: this.lightingTrace.enabled,
+        nextRequest: this.lightingTrace.nextRequest,
+        emit: (event, details) => this.lightingTrace.emit(event, details, commandId) };
+      entry.lightingTrace.emit('queue.enqueued', { depth: this.queueDepth + 1 });
+    }
     this.queueDepth += 1;
     if (this.queueDepth > 1) {
       this.platform.log?.debug?.(`Flame Connect command queued (${this.queueDepth} pending).`);
@@ -401,6 +422,8 @@ export class FlameConnectAccessory {
     const pending = this.commandQueue
       .then(() => {
         const waitedMs = Date.now() - queuedAt;
+        traceStartedAt = entry.lightingTrace ? performance.now() : 0;
+        entry.lightingTrace?.emit('queue.started', { waitedMs, depth: this.queueDepth });
         if (waitedMs > 250) {
           this.platform.log?.debug?.(`Flame Connect command waited ${waitedMs}ms in the queue.`);
         }
@@ -418,6 +441,8 @@ export class FlameConnectAccessory {
         });
       })
       .then((value) => {
+        entry.lightingTrace?.emit('queue.completed', { totalMs: Math.round(performance.now() - traceQueuedAt),
+          executionMs: Math.round(performance.now() - traceStartedAt) });
         if (this.inCloudFailure) {
           this.inCloudFailure = false;
           this.lastCloudError = null;
@@ -426,6 +451,10 @@ export class FlameConnectAccessory {
         return value;
       })
       .catch((error) => {
+        entry.lightingTrace?.emit('queue.failed', { dispatched: entry.dispatched,
+          totalMs: Math.round(performance.now() - traceQueuedAt),
+          kind: ['timeout', 'communication', 'rejected', 'auth'].includes(error?.kind) ? error.kind : 'other',
+          retryAfterMs: Number.isFinite(error?.retryAfterMs) ? error.retryAfterMs : null });
         if (entry.dispatched && isCloudError(error)) this.pendingAcknowledgements.clear();
         this.noteCloudFailure(error, label, Date.now() - queuedAt);
         throw this.toHapError(error);
@@ -574,7 +603,11 @@ export class FlameConnectAccessory {
 
   async ensureFresh(force = false) {
     const cacheMs = Math.max(5, Number(this.platform.config.cacheSeconds || 30)) * 1000;
-    if (!force && !this.acknowledgementsExpired() && this.snapshotTrusted && this.lastRefresh && Date.now() - this.lastRefresh < cacheMs) return this.state;
+    if (!force && !this.acknowledgementsExpired() && this.snapshotTrusted && this.lastRefresh && Date.now() - this.lastRefresh < cacheMs) {
+      this.lightingTrace.emit('read.cache.hit', { ageMs: Date.now() - this.lastRefresh });
+      return this.state;
+    }
+    this.lightingTrace.emit('read.cache.miss', { forced: force, trusted: this.snapshotTrusted });
     // Reads must also settle inside the HAP window. On deadline the getter
     // proceeds with the last known state; the refresh continues in the
     // background and reconciles via pushStateToHomeKit on completion.
@@ -604,12 +637,16 @@ export class FlameConnectAccessory {
     const ageMs = this.lastRefresh ? Date.now() - this.lastRefresh : Number.POSITIVE_INFINITY;
     assertCanSubmit();
     if (!this.acknowledgementsExpired() && this.snapshotTrusted && maximumAgeMs > 0 && ageMs < maximumAgeMs) {
+      currentCommandTrace()?.emit('state.source', { cached: true, ageMs: Math.round(ageMs) });
       this.platform.log?.debug?.(`Using ${Math.max(0, Math.round(ageMs))}ms-old state for Flame Connect command.`);
       return this.state;
     }
     this.platform.log?.debug?.('Refreshing state before Flame Connect command.');
+    currentCommandTrace()?.emit('state.source', { cached: false, ageMs: Number.isFinite(ageMs) ? Math.round(ageMs) : null });
     const observed = this.overviewVersion;
+    const freshnessStarted = this.lightingTrace.enabled() ? performance.now() : 0;
     await this.refresh();
+    currentCommandTrace()?.emit('state.refreshed', { durationMs: Math.round(performance.now() - freshnessStarted) });
     assertCanSubmit();
     // A shared background GET may have been discarded after a newer write.
     // It cannot satisfy a command's need for a fresh full observation.
@@ -691,9 +728,16 @@ export class FlameConnectAccessory {
     if (this.disposed) return Promise.reject(new Error('Flame Connect accessory is shutting down.'));
     let pending = this.pendingColors.get(key);
     if (!pending) {
+      pending = [...this.colorOperations].find((batch) => batch.key === key
+        && batch.orderEpoch === this.colorOrderEpoch && !batch.sealed
+        && !batch.cancelled && !batch.terminal);
+      if (pending) pending.operation.entry.lightingTrace?.emit('batch.superseded', { light: key });
+    }
+    if (!pending) {
       pending = {
-        key, changes: {}, waiters: [], timer: null, maxTimer: null,
-        release: null, cancelled: false, terminal: false,
+        key, changes: {}, waiters: [], timer: null, maxTimer: null, traceStartedAt: this.lightingTrace.enabled() ? performance.now() : 0,
+        release: null, cancelled: false, terminal: false, sealed: false, ready: false,
+        orderEpoch: this.colorOrderEpoch,
       };
       pending.gate = new Promise((resolve) => { pending.release = resolve; });
       this.pendingColors.set(key, pending);
@@ -719,9 +763,11 @@ export class FlameConnectAccessory {
           if (!pending.cancelled) pending.waiters.forEach(({ reject }) => reject(error));
         },
       );
-      pending.maxTimer = setTimeout(() => this.flushPendingColor(key), 750);
+      pending.maxTimer = setTimeout(() => this.flushPendingColor(key, 'maximum-window'), 750);
     }
     pending.changes[field] = value;
+    pending.operation.entry.lightingTrace?.emit('input.color', { light: key, field,
+      value: typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value)) ? value : null });
     const result = new Promise((resolve, reject) => pending.waiters.push({ resolve, reject }));
     // Propagate queue-entry cancellation to the underlying color operation: a
     // coalesced color that never started must not recolor the light later,
@@ -731,9 +777,11 @@ export class FlameConnectAccessory {
     result.entry = pending.operation.entry;
     // Trailing edge: every new component restarts the window, so a slow
     // gesture coalesces into a single cloud write.
-    if (pending.timer) clearTimeout(pending.timer);
-    pending.timer = setTimeout(() => this.flushPendingColor(key), 200);
-    this.traceLighting(`input ${key}: ${field}=${value}`);
+    if (!pending.ready) {
+      if (pending.timer) clearTimeout(pending.timer);
+      const quietMs = 400;
+      pending.timer = setTimeout(() => this.flushPendingColor(key, 'trailing-edge'), quietMs);
+    }
     return result;
   }
 
@@ -746,38 +794,38 @@ export class FlameConnectAccessory {
     this.colorOperations.delete(pending);
   }
 
-  traceLighting(message) {
-    const log = this.platform.log;
-    const method = this.platform.config.debugLighting ? 'info' : 'debug';
-    log?.[method]?.(`Lighting ${this.debugLabel || 'fireplace'} +${Date.now() - this.traceStartedAt}ms: ${message}.`);
-  }
 
-  flushPendingColor(key) {
+  flushPendingColor(key, reason = 'ordering-boundary') {
     const pending = this.pendingColors.get(key);
     if (!pending) return;
+    pending.ready = true;
+    pending.operation.entry.lightingTrace?.emit('batch.ready', { light: key, reason,
+      stagedMs: Math.round(performance.now() - pending.traceStartedAt), componentWrites: pending.waiters.length });
     this.pendingColors.delete(key);
     if (pending.timer) clearTimeout(pending.timer);
     clearTimeout(pending.maxTimer);
     pending.timer = null;
-    this.traceLighting(`batch ready ${key}`);
     pending.release();
   }
 
   cancelPendingColor(key) {
-    const pending = this.pendingColors.get(key);
-    if (!pending) return null;
-    this.pendingColors.delete(key);
-    if (pending.timer) clearTimeout(pending.timer);
-    clearTimeout(pending.maxTimer);
-    pending.timer = null;
-    const { on, ...changes } = pending.changes;
-    this.rememberColor(key, { ...this.colorForCommand(key), ...changes });
-    // Only a still-staged color can be cancelled. Once flushPendingColor has
-    // released the gate the cloud write is underway and must not be
-    // interrupted; later commands then execute after it in queue order.
-    pending.cancelled = true;
-    pending.release();
-    return pending;
+    const batches = [...this.colorOperations].filter((batch) => batch.key === key
+      && !batch.sealed && !batch.cancelled && !batch.terminal);
+    if (!batches.length) return null;
+    let remembered = this.colorForCommand(key);
+    for (const batch of batches) {
+      batch.operation.entry.lightingTrace?.emit('batch.cancelled', { light: key });
+      const { on, ...changes } = batch.changes;
+      remembered = { ...remembered, ...changes };
+      if (this.pendingColors.get(key) === batch) this.pendingColors.delete(key);
+      clearTimeout(batch.timer);
+      clearTimeout(batch.maxTimer);
+      batch.timer = null;
+      batch.cancelled = true;
+      batch.release();
+    }
+    this.rememberColor(key, remembered);
+    return { waiters: batches.flatMap((batch) => batch.waiters) };
   }
 
   settleColorWaiters(waiters, operation) {
@@ -789,6 +837,10 @@ export class FlameConnectAccessory {
 
   async commitColor(key, changes, batch) {
     await this.ensureCommandFresh();
+    if (batch?.cancelled || this.disposed) return;
+    // Freeze at packet preparation, BEFORE any asynchronous authentication or
+    // transmission. Never mutate an in-flight packet or replay an old write.
+    if (batch) batch.sealed = true;
     const { on, ...components } = changes;
     const next = { ...this.colorForCommand(key), ...components };
     if (on && next.brightness === 0) next.brightness = this.accessory.context.lastNonzeroColors?.[key]?.brightness || 100;
@@ -801,7 +853,6 @@ export class FlameConnectAccessory {
     // enable flag belong in one packet; a redundant On must not flash the
     // previously stored color before the color components arrive.
     if (!sameColor || (on && flag !== OnOff.ON)) {
-      this.traceLighting(`write ${key}: RGBW=${rgbw.red},${rgbw.green},${rgbw.blue},${rgbw.white}; enable=${on ? 1 : flag}; theme=${key === 'logColor' ? 'log' : 0}`);
       if (key === 'logColor') {
         this.state.log = await this.platform.client.setLogColor(this.fire.fireId,
           { ...this.state.log, ...(on ? { logEffect: OnOff.ON } : {}) }, rgbw);
@@ -810,7 +861,6 @@ export class FlameConnectAccessory {
           this.fire.fireId, this.state.flame, { [key]: rgbw, mediaTheme: 0, ...(on ? { [flagKey]: OnOff.ON } : {}) },
         );
       }
-      this.traceLighting(`acknowledged ${key}`);
     }
     this.rememberColor(key, next);
     if (batch) this.colorOperations.delete(batch);
@@ -825,7 +875,9 @@ export class FlameConnectAccessory {
       this.boostRefreshTimer = null;
     }
     const error = new Error('Flame Connect accessory is shutting down.');
-    for (const key of [...this.pendingColors.keys()]) {
+    const keys = new Set(this.pendingColors.keys());
+    for (const batch of this.colorOperations) if (!batch.sealed) keys.add(batch.key);
+    for (const key of keys) {
       const pending = this.cancelPendingColor(key);
       pending?.waiters.forEach(({ reject }) => reject(error));
     }
@@ -853,16 +905,24 @@ export class FlameConnectAccessory {
 
   async refresh() {
     if (this.disposed) throw new FlameConnectCloudError('The fireplace accessory is shutting down.');
-    if (this.refreshPromise) return this.refreshPromise;
+    if (this.refreshPromise) {
+      this.lightingTrace.emit('overview.joined');
+      return this.refreshPromise;
+    }
     this.refreshPromise = (async () => {
       // Capture the state version before the GET: a command that completes
       // while this read is in flight holds newer state, and this older
       // response must not overwrite it when it lands late.
       const epoch = this.stateEpoch;
       try {
-        const overview = await this.platform.client.getFireOverview(this.fire.fireId);
+        this.lightingTrace.emit('overview.started');
+        const overview = await (this.lightingTrace.enabled()
+          ? withReadTrace(this.lightingTrace, () => this.platform.client.getFireOverview(this.fire.fireId))
+          : this.platform.client.getFireOverview(this.fire.fireId));
+        if (this.lightingTrace.enabled()) this.lightingTrace.emit('overview.received', { state: lightingState(overview.parameters) });
         if (this.disposed) return this.state;
         if (epoch !== this.stateEpoch) {
+          this.lightingTrace.emit('overview.discarded');
           this.platform.log?.debug?.('Flame Connect discarded a stale overview that landed after a newer command.');
           return this.state;
         }
@@ -905,6 +965,7 @@ export class FlameConnectAccessory {
         }
         this.confirmedParameters = confirmed;
         this.state = merged;
+        if (this.lightingTrace.enabled()) this.lightingTrace.emit('overview.applied', { state: lightingState(this.state) });
         this.stateEpoch += 1;
         this.lastRefresh = Date.now();
         this.overviewVersion += 1;
@@ -950,6 +1011,8 @@ export class FlameConnectAccessory {
   }
 
   pushStateToHomeKit() {
+    if (this.lightingTrace.enabled()) this.lightingTrace.emit('home.publish', { state: lightingState(this.state) });
+    try {
     if (this.disposed) return;
     this.lastPublishedState = structuredClone(this.state);
     const C = this.platform.Characteristic;
@@ -1000,6 +1063,27 @@ export class FlameConnectAccessory {
       this.logService.updateCharacteristic(C.Hue, hsv.hue);
       this.logService.updateCharacteristic(C.Saturation, hsv.saturation);
       this.logService.updateCharacteristic(C.Brightness, hsv.brightness);
+    }
+
+    } finally {
+      if (this.lightingTrace.enabled()) {
+        try {
+          const lights = {};
+          for (const [name, service] of [['Bed', this.mediaService], ['Accent', this.overheadService],
+            ['Logs', this.logService], ['Flames', this.flameService], ['Fireplace', this.powerService]]) {
+            if (!service) continue;
+            lights[name] = {};
+            for (const key of ['On', 'Hue', 'Saturation', 'Brightness']) {
+              const characteristic = service.characteristics.find((entry) => entry.UUID === this.platform.Characteristic[key].UUID);
+              const value = characteristic?.value;
+              if (typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value))) lights[name][key] = value;
+            }
+          }
+          const trace = currentCommandTrace();
+          if (trace) trace.emit('home.characteristics', { lights });
+          else this.lightingTrace.emit('home.characteristics', { lights });
+        } catch { /* Snapshot collection must not affect HAP updates. */ }
+      }
     }
   }
 
@@ -1113,10 +1197,36 @@ export class FlameConnectAccessory {
     this.commandSucceeded();
   }
 
-  setLightColor(key, field, value) {
+  setLightColor(key, field, value, acceptInput = false) {
     if (!['mediaColor','overheadColor'].includes(key) || !['hue','saturation','brightness'].includes(field)
       || !Number.isFinite(value)) throw new Error('Invalid lighting color setting.');
-    return this.withWriteDeadline(this.stageColor(key, field, value), `color(${key})`);
+    return this.completeColorInput(key, field, value, `color(${key})`, acceptInput);
+  }
+
+  completeColorInput(key, field, value, label, acceptInput) {
+    // HomeKit hue/saturation acknowledge accepted intent; internal callers
+    // can still await confirmed completion. Home can supply later samples.
+    // This acknowledges queued intent, not cloud execution.
+    // On/Off, brightness and heater/power writes keep their existing semantics.
+    const early = acceptInput === true
+      && ['hue', 'saturation'].includes(field);
+    if (early && this.disposed) return Promise.reject(new Error('Flame Connect accessory is shutting down.'));
+    if (early && Date.now() < this.cloudFailureUntil && this.lastCloudError) {
+      return Promise.reject(this.toHapError(this.lastCloudError));
+    }
+    const staged = this.stageColor(key, field, value);
+    const pending = this.withWriteDeadline(staged, label);
+    if (!early) return pending;
+    staged.entry.lightingTrace?.emit('input.accepted', { light: key, field, cloudConfirmed: false });
+    // The queue still records transport errors, invalidates snapshot trust,
+    // and never replays an uncertain write. Consume this detached rejection
+    // explicitly and restore confirmed UI state once the batch has settled.
+    pending.catch(() => {
+      staged.entry.lightingTrace?.emit('input.backgroundFailed', { light: key, field });
+      try { this.pushStateToHomeKit(); }
+      catch { staged.entry.lightingTrace?.emit('input.restoreFailed', { light: key }); }
+    });
+    return Promise.resolve();
   }
 
   async getHeat() {
@@ -1260,11 +1370,11 @@ export class FlameConnectAccessory {
     this.commandSucceeded();
   }
 
-  setLogColor(field, value) {
+  setLogColor(field, value, acceptInput = false) {
     if (!['hue', 'saturation', 'brightness'].includes(field) || !Number.isFinite(value)) {
       throw new Error('Invalid log color setting.');
     }
-    return this.withWriteDeadline(this.stageColor('logColor', field, value), 'color(logColor)');
+    return this.completeColorInput('logColor', field, value, 'color(logColor)', acceptInput);
   }
 
   requireParameter(key) {

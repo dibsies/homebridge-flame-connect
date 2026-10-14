@@ -9,7 +9,9 @@ import {
 } from './constants.js';
 import { FlameConnectCloudError, asCloudError, isCloudError } from './errors.js';
 import { decodeParameter, encodeFlame, encodeHeat, encodeLog, encodeMode } from './protocol.js';
-import { assertCanSubmit, markCommandDispatched, markCommandRejected } from './command.js';
+import { assertCanSubmit, markCommandDispatched, markCommandRejected, currentCommandTrace } from './command.js';
+import { lightingPackets, currentReadTrace } from './lighting-trace.js';
+import { performance } from 'node:perf_hooks';
 
 // A single API command must never block a fireplace's whole command queue
 // indefinitely: a hung cloud call fails fast and the caller sees a proper
@@ -83,6 +85,10 @@ export class FlameConnectClient {
   }
 
   async request(method, route, body, retried = false) {
+    const trace = currentCommandTrace() || currentReadTrace();
+    const requestId = trace?.nextRequest();
+    const elapsed = (start) => Math.round((performance.now() - start) * 1000) / 1000;
+    const authStarted = trace ? performance.now() : 0;
     if (Date.now() < this.retryNotBefore) throw new FlameConnectCloudError('Flame Connect is temporarily limiting requests.', {
       retryAfterMs: this.retryNotBefore - Date.now(),
     });
@@ -93,14 +99,21 @@ export class FlameConnectClient {
     // preserves existing codes, so FLAMECONNECT_REAUTH_REQUIRED still means
     // "the user must sign in again".
     let token;
+    trace?.emit('auth.started', { request: requestId });
     try {
       token = await this.auth.getAccessToken();
+      trace?.emit('auth.ready', { request: requestId, durationMs: elapsed(authStarted) });
     } catch (error) {
+      trace?.emit('auth.failed', { request: requestId, durationMs: elapsed(authStarted) });
       throw asCloudError(error);
     }
     let response;
+    const httpStarted = trace ? performance.now() : 0;
     try {
       if (method !== 'GET') markCommandDispatched();
+      if (trace?.enabled()) trace.emit('http.send', { request: requestId, method,
+        operation: route === '/api/Fires/WriteWifiParameters' ? 'write' : method === 'GET' ? 'read' : 'other',
+        ...(route === '/api/Fires/WriteWifiParameters' ? { packets: lightingPackets(body?.Parameters) } : {}) });
       response = await fetch(`${API_BASE}${route}`, {
         method,
         headers: {
@@ -111,19 +124,34 @@ export class FlameConnectClient {
         body: body === undefined ? undefined : JSON.stringify(body),
         signal: AbortSignal.timeout(API_REQUEST_TIMEOUT_MS),
       });
+      trace?.emit('http.response', { request: requestId, status: Number.isInteger(response.status) ? response.status : null,
+        durationMs: elapsed(httpStarted) });
     } catch (error) {
+      trace?.emit('http.failed', { request: requestId, durationMs: elapsed(httpStarted) });
       throw asCloudError(error);
     }
     let text;
+    const bodyStarted = trace ? performance.now() : 0;
     try {
       text = await response.text();
+      trace?.emit('http.body.ready', { request: requestId, durationMs: elapsed(bodyStarted),
+        responseBytes: typeof text === 'string' ? Buffer.byteLength(text) : null, totalHttpMs: elapsed(httpStarted) });
     } catch (error) {
+      trace?.emit('http.body.failed', { request: requestId, durationMs: elapsed(bodyStarted) });
       throw asCloudError(error);
     }
     if (!response.ok) {
       if (response.status === 401 && !retried) {
         if (method !== 'GET') markCommandRejected();
-        try { await this.auth.getAccessToken(true); } catch (error) { throw asCloudError(error); }
+        const refreshStarted = trace ? performance.now() : 0;
+        trace?.emit('auth.refresh.started', { request: requestId });
+        try {
+          await this.auth.getAccessToken(true);
+          trace?.emit('auth.refresh.ready', { request: requestId, durationMs: elapsed(refreshStarted) });
+        } catch (error) {
+          trace?.emit('auth.refresh.failed', { request: requestId, durationMs: elapsed(refreshStarted) });
+          throw asCloudError(error);
+        }
         if (method === 'GET') {
           return this.request(method, route, body, true);
         }
@@ -137,6 +165,7 @@ export class FlameConnectClient {
         );
       }
       const retryAfterMs = retryAfterMilliseconds(response);
+      trace?.emit('http.backoff', { request: requestId, retryAfterMs: retryAfterMs ?? null, status: response.status });
       if ([429, 503].includes(response.status) && retryAfterMs !== undefined) {
         this.retryNotBefore = Date.now() + retryAfterMs;
       }
@@ -244,6 +273,9 @@ export class FlameConnectClient {
       FireId: fireId,
       Parameters: parameters,
     });
+    currentCommandTrace()?.emit('write.result', { resultCodePresent: result?.ResultCode !== undefined,
+      resultCode: ['number', 'string'].includes(typeof result?.ResultCode) && Number.isFinite(Number(result.ResultCode))
+        ? Number(result.ResultCode) : null });
     // A successful HTTP response need not include a ResultCode. Preserve
     // the original transport-success contract; validate a code only when
     // the API actually supplies one. This is not device execution confirmation.
